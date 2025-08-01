@@ -363,13 +363,16 @@ def _get_output_files_and_check_if_multiple(
     )  # so `get_X()` will raise an informative FileNotFoundError
 
 def _get_output_files_warn_if_multiple(
-    output_file: PathLike = "vasprun.xml", path: PathLike = ".", dir_type: None | str = None
+    output_file: PathLike = "vasprun.xml", 
+    path: PathLike = ".", 
+    dir_type: None | str = None,
+    quiet: bool = False
 ) -> tuple[PathLike, bool]:
     """
     Wrapper for _get_output_files_and_check_if_multiple to include warning inside.
     """
     file_path, multiple = _get_output_files_and_check_if_multiple(output_file, path)
-    if multiple:
+    if multiple and not quiet:
         _multiple_files_warning(
             output_file,
             path,
@@ -1180,7 +1183,6 @@ def reorder_s1_like_s2(s1_structure: Structure, s2_structure: Structure, thresho
     return new_structure
 
 
-
 def _compare_potcar_symbols(
     bulk_potcar_symbols,
     defect_potcar_symbols,
@@ -1196,7 +1198,6 @@ def _compare_potcar_symbols(
     Returns True if the symbols match, otherwise returns a list of the symbols
     for the bulk and defect calculations.
     """
-    
     if only_matching_elements:
         defect_elements = [symbol["titel"].split()[1].split("_")[0] for symbol in defect_potcar_symbols]
         symbols_to_check = [
@@ -1209,7 +1210,6 @@ def _compare_potcar_symbols(
 
     bulk_mismatch_list = []
     defect_mismatch_list = []
-
     for symbol in symbols_to_check:
         if symbol["titel"] not in [symbol["titel"] for symbol in defect_potcar_symbols]:
             if warn:
@@ -1494,7 +1494,7 @@ def get_nelect_from_vasprun(vasprun: Vasprun) -> int | float:
     # spin-polarisation / account for NELECT changes from neutral apparently
 
     eigenvalues_and_occs = vasprun.eigenvalues
-    kweights = vasprun.actual_kpoints_weights
+    kweights = np.array(vasprun.actual_kpoints_weights)
     if kweights.sum() != 1:
         kweights/=kweights.sum()
 
@@ -1525,13 +1525,10 @@ def get_neutral_nelect_from_vasprun(vasprun: Vasprun, skip_potcar_init: bool = F
             The number of electrons in the system for a neutral charge state.
     """
     nelect = None
-    
-
     if not skip_potcar_init:
         with contextlib.suppress(Exception):  # try determine charge without POTCARs first:
             grouped_symbols = [list(group) for key, group in itertools.groupby(vasprun.atomic_symbols)]
             potcar_summary_stats = _get_potcar_summary_stats()
-    
 
             for trial_functional in ["PBE_64", "PBE_54", "PBE_52", "PBE", potcar_summary_stats.keys()]:
                 if all(
@@ -1558,12 +1555,9 @@ def get_neutral_nelect_from_vasprun(vasprun: Vasprun, skip_potcar_init: bool = F
 
     # else try reverse engineer NELECT using DefectDictSet
     from doped.vasp import DefectDictSet
-    
 
     potcar_symbols = [titel.split()[1] for titel in vasprun.potcar_symbols]
-
     potcar_settings = {symbol.split("_")[0]: symbol for symbol in potcar_symbols}
-
     with warnings.catch_warnings():  # ignore POTCAR warnings if not available
         warnings.simplefilter("ignore", UserWarning)
         nelect = DefectDictSet(
@@ -1572,9 +1566,7 @@ def get_neutral_nelect_from_vasprun(vasprun: Vasprun, skip_potcar_init: bool = F
                     user_potcar_settings=potcar_settings,
                 ).nelect
 
-
         return nelect
-
 
 def _get_bulk_supercell(defect_entry: DefectEntry):
     if hasattr(defect_entry, "bulk_supercell") and defect_entry.bulk_supercell:
@@ -1909,16 +1901,13 @@ def total_charge_from_vasprun(vasprun: Vasprun, charge_state: int | None, code: 
         int: The auto-determined charge state.
     """
     auto_charge = None
-    
+
     try:
         if get_nelect_from_vasprun(vasprun) is None:
-        #if vasprun.incar.get("NELECT") is None:
             auto_charge = 0  # neutral if NELECT not specified
 
         else:
-            #nelect = vasprun.parameters.get("NELECT")
             nelect = get_nelect_from_vasprun(vasprun)
-
             if code == 'vasp':
                 neutral_nelect = get_neutral_nelect_from_vasprun(vasprun)
             elif code == 'espresso':
@@ -1975,16 +1964,9 @@ def total_charge_from_vasprun(vasprun: Vasprun, charge_state: int | None, code: 
 
 
 def _get_bulk_locpot_dict(bulk_path, quiet=False, filename = "LOCPOT"):
-    bulk_locpot_path, multiple = _get_output_files_warn_if_multiple(filename, bulk_path, dir_type="bulk")
+    bulk_locpot_path, multiple = _get_output_files_warn_if_multiple(filename, bulk_path, dir_type="bulk", quiet = quiet)
 
-    # bulk_locpot_path, multiple = _get_output_files_and_check_if_multiple(filename, bulk_path)
-    # if multiple and not quiet:
-    #     _multiple_files_warning(
-    #         filename,
-    #         bulk_path,
-    #         bulk_locpot_path,
-    #         dir_type="bulk",
-    #     )
+
     bulk_locpot = get_locpot(bulk_locpot_path)
     return {str(k): bulk_locpot.get_average_along_axis(k) for k in [0, 1, 2]}
 
@@ -2041,7 +2023,7 @@ class RunParser:
     def __new__(cls, code: Literal["vasp", "espresso"], **kwargs):
         code = code.lower()
         if code == "vasp":
-            return RunParserVasp #(**kwargs)
+            return RunParserVasp #(**kwargs) #NOT IMPLEMENTED
         elif code == "espresso":
             return RunParserEspresso #(**kwargs)
         else:
@@ -2287,49 +2269,6 @@ class RunParserEspresso():
             ) from None
         return locpot
 
-    # @classmethod
-    # def potcar_spec_fix(cls, vasprun_obj):
-    #     """
-    #     Converts QE-style pseudopotential filenames to VASP-style potcar_spec dictionaries
-    #     by extracting the element and pseudopotential type from the filename.
-        
-    #     Parameters:
-    #         vasprun_obj: An object with `potcar_spec` as a list of pseudopotential filenames.
-        
-    #     Returns:
-    #         List[dict]: VASP-style potcar_spec list.
-    #     """
-    #     import re
-    #     qe_pseudos = vasprun_obj.potcar_spec
-    #     vasp_specs = []
-
-    #     for pseudo in qe_pseudos:
-    #         # Extract element (first word or token before `_` or `.`)
-    #         element_match = re.match(r'^([A-Za-z]+)', pseudo)
-    #         element = element_match.group(1).capitalize() if element_match else "X"
-
-    #         # Infer functional (e.g., PBE, LDA)
-    #         functional_match = re.search(r'_(pbe|lda|pw91|revpbe)', pseudo, re.IGNORECASE)
-    #         functional = functional_match.group(1).upper() if functional_match else "PBE"
-
-    #         # Infer potential type (PAW/USPP)
-    #         if 'paw' in pseudo.lower():
-    #             method = "PAW"
-    #         elif 'uspp' in pseudo.lower():
-    #             method = "USPP"
-    #         else:
-    #             method = "PAW"  # default guess
-
-    #         titel = f"{method}_{functional} {element} UNKNOWN"
-
-    #         vasp_specs.append({
-    #             'titel': titel,
-    #             'hash': None,
-    #             'summary_stats': {}
-    #         })
-
-    #     return vasp_specs
-
     @classmethod
     def _get_core_site_potentials(cls, cube_file=None, data=None, atoms=None, radius_bohr=1.1, n_points=5000, verbose = False):
         """Calculate spherical average potential at atomic sites from a .cube file or preloaded data."""
@@ -2402,8 +2341,6 @@ class RunParserEspresso():
         #print(computed_entry.structure)
         ent = ComputedEntry.from_dict(d_) #Computed entries list. Why twice?
         ent.structure = computed_entry.structure
-
-        print("STANDARDIZE COMPUTED ENERGY EXIT")
 
         return ent
     
