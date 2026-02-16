@@ -15,9 +15,17 @@ import pytest
 from monty.serialization import dumpfn, loadfn
 from pymatgen.core.composition import Composition
 from pymatgen.core.structure import Structure
-from test_analysis import if_present_rm
-from test_plotting import custom_mpl_image_compare
-from test_thermodynamics import _run_func_and_capture_stdout_warnings
+from test_utils import (
+    EXAMPLE_DIR,
+    _print_warning_info,
+    _run_func_and_capture_stdout_warnings,
+    api_key,
+    custom_mpl_image_compare,
+    data_dir,
+    if_present_rm,
+    module_path,
+    plot_chempot_heatmap_and_test_no_warnings,
+)
 
 from doped import chemical_potentials
 from doped.utils.symmetry import get_primitive_structure
@@ -31,16 +39,11 @@ def _compare_chempot_dicts(dict1, dict2):
             assert np.isclose(val, dict2[key], atol=1e-5)
 
 
-cwd = os.path.dirname(os.path.abspath(__file__))
-
-
 class CompetingPhasesTestCase(unittest.TestCase):
-    def setUp(self) -> None:
-        self.api_key = "UsPX9Hwut4drZQXPTxk4CwlCstrAAjDv"  # SK MP Imperial email (GitHub) A/C
-        self.EXAMPLE_DIR = os.path.join(cwd, "../examples")
-        self.cdte = Structure.from_file(os.path.join(self.EXAMPLE_DIR, "CdTe/relaxed_primitive_POSCAR"))
-        self.na2fepo4f = Structure.from_file(os.path.join(cwd, "data/Na2FePO4F_MP_POSCAR"))
-        self.cu2sise3 = Structure.from_file(os.path.join(cwd, "data/Cu2SiSe3_MP_POSCAR"))
+    def setUp(self):
+        self.cdte = Structure.from_file(os.path.join(EXAMPLE_DIR, "CdTe/relaxed_primitive_POSCAR"))
+        self.na2fepo4f = Structure.from_file(os.path.join(data_dir, "Na2FePO4F_MP_POSCAR"))
+        self.cu2sise3 = Structure.from_file(os.path.join(data_dir, "Cu2SiSe3_MP_POSCAR"))
         self.cu2sise4 = self.cu2sise3.get_primitive_structure().copy()
         self.cu2sise4.append("Se", [0.5, 0.5, 0.5])
         self.cu2sise4.append("Se", [0.5, 0.75, 0.5])
@@ -100,7 +103,7 @@ class CompetingPhasesTestCase(unittest.TestCase):
         )
 
     def test_init(self):
-        cp = chemical_potentials.CompetingPhases("ZrO2", energy_above_hull=0.03, api_key=self.api_key)
+        cp = chemical_potentials.CompetingPhases("ZrO2", energy_above_hull=0.03, api_key=api_key)
 
         assert len(cp.entries) == 13
         assert [entry.name for entry in cp.entries] == self.zro2_entry_list
@@ -110,7 +113,7 @@ class CompetingPhasesTestCase(unittest.TestCase):
 
     def test_init_full_phase_diagram(self):
         cp = chemical_potentials.CompetingPhases(
-            "ZrO2", energy_above_hull=0.03, api_key=self.api_key, full_phase_diagram=True
+            "ZrO2", energy_above_hull=0.03, api_key=api_key, full_phase_diagram=True
         )
 
         assert len(cp.entries) == 14  # Zr4O now present
@@ -133,7 +136,7 @@ class CompetingPhasesTestCase(unittest.TestCase):
         issue, though ``pymatgen`` has now updated to no longer support the
         legacy MP database now anyway.
         """
-        cp = chemical_potentials.CompetingPhases("ZnSe", api_key=self.api_key)
+        cp = chemical_potentials.CompetingPhases("ZnSe", api_key=api_key)
         assert any(e.name == "ZnSe2" for e in cp.entries)
         assert len(cp.entries) == 12  # ZnSe2 present; 2 new Zn entries (mp-264...) with new MP API
         znse2_entry = next(e for e in cp.entries if e.name == "ZnSe2")
@@ -144,12 +147,12 @@ class CompetingPhasesTestCase(unittest.TestCase):
 
     def test_init_YTOS(self):
         # 144 phases on Y-Ti-O-S MP phase diagram
-        cp = chemical_potentials.CompetingPhases("Y2Ti2S2O5", energy_above_hull=0.1, api_key=self.api_key)
+        cp = chemical_potentials.CompetingPhases("Y2Ti2S2O5", energy_above_hull=0.1, api_key=api_key)
         assert len(cp.entries) == 113
         self.check_O2_entry(cp)
 
         cp = chemical_potentials.CompetingPhases(
-            "Y2Ti2S2O5", energy_above_hull=0.1, full_phase_diagram=True, api_key=self.api_key
+            "Y2Ti2S2O5", energy_above_hull=0.1, full_phase_diagram=True, api_key=api_key
         )
         # 149 phases on Y-Ti-O-S MP full phase diagram, 4 extra O2 phases removed
         assert len(cp.entries) == 145
@@ -171,7 +174,7 @@ class CompetingPhasesTestCase(unittest.TestCase):
         including rounding to "_0" and increasing the number of digits if
         duplicates are encountered.
         """
-        cdte_cp = chemical_potentials.CompetingPhases("CdTe", api_key=self.api_key)
+        cdte_cp = chemical_potentials.CompetingPhases("CdTe", api_key=api_key)
         assert [entry.data["doped_name"] for entry in cdte_cp.entries] == [
             "CdTe_F-43m_EaH_0",
             "Cd_Fm-3m_EaH_0",
@@ -191,7 +194,7 @@ class CompetingPhasesTestCase(unittest.TestCase):
         # test case when the EaH rounding needs to be dynamically updated:
         # (this will be quite a rare case, as it requires two phases with the same formula, space group
         # and energy above hull to 1 meV/atom
-        cds_cp = chemical_potentials.CompetingPhases("CdS", api_key=self.api_key)
+        cds_cp = chemical_potentials.CompetingPhases("CdS", api_key=api_key)
         assert "S_Pnnm_EaH_0.014" in [entry.data["doped_name"] for entry in cds_cp.entries]
         new_entry = deepcopy(
             next(entry for entry in cds_cp.entries if entry.data["doped_name"] == "S_Pnnm_EaH_0.014")
@@ -209,18 +212,20 @@ class CompetingPhasesTestCase(unittest.TestCase):
         the Materials Project database.
         """
         for cp_settings in [
-            {"composition": "Na2FePO4F", "energy_above_hull": 0.02, "api_key": self.api_key},
+            {"composition": "Na2FePO4F", "energy_above_hull": 0.02, "api_key": api_key},
             {
                 "composition": "Na2FePO4F",
                 "energy_above_hull": 0.02,
-                "api_key": self.api_key,
+                "api_key": api_key,
                 "full_phase_diagram": True,
             },
         ]:
             print(f"Testing with settings: {cp_settings}")
             with warnings.catch_warnings(record=True) as w:
                 cp = chemical_potentials.CompetingPhases(**cp_settings)
-            print([str(warning.message) for warning in w])  # for debugging
+                cp.convergence_setup(potcar_spec=True)  # test methods
+                cp.vasp_std_setup(potcar_spec=True)  # test methods
+            _print_warning_info(w)  # for debugging
             if cp_settings.get("full_phase_diagram"):
                 assert len(cp.entries) == 172
             else:
@@ -232,7 +237,7 @@ class CompetingPhasesTestCase(unittest.TestCase):
         Test generating CompetingPhases with a composition that's not on the
         Materials Project database.
         """
-        unknown_host_cp_kwargs = {"composition": "Cu2SiSe4", "api_key": self.api_key}
+        unknown_host_cp_kwargs = {"composition": "Cu2SiSe4", "api_key": api_key}
         for cp_settings in [
             {},
             {"energy_above_hull": 0.0},
@@ -242,11 +247,17 @@ class CompetingPhasesTestCase(unittest.TestCase):
             print(f"Testing with settings: {kwargs}")
             with warnings.catch_warnings(record=True) as w:
                 cp = chemical_potentials.CompetingPhases(**kwargs)
-            print([str(warning.message) for warning in w])  # for debugging
+                cp.convergence_setup(potcar_spec=True)  # test methods
+                cp.vasp_std_setup(potcar_spec=True)  # test methods
+            _print_warning_info(w)  # for debugging
             assert len(w) == 1
             assert "Note that no Materials Project (MP) database entry exists for Cu2SiSe4. Here" in str(
-                w[-1].message
+                w[0].message
             )
+            assert (
+                "Structure for entry Cu2SiSe4 not available; input files will not be generated for "
+                "this entry."
+            ) in str(w[-1].message)
             if kwargs.get("full_phase_diagram"):
                 assert len(cp.entries) == 29
             elif kwargs.get("energy_above_hull") == 0.0:
@@ -257,10 +268,8 @@ class CompetingPhasesTestCase(unittest.TestCase):
             # check naming of fake entry
             assert "Cu2SiSe4_NA_EaH_0" in [entry.data["doped_name"] for entry in cp.entries]
 
-            # TODO: Test file generation functions for an unknown host!
-
     def test_convergence_setup(self):
-        cp = chemical_potentials.CompetingPhases("ZrO2", energy_above_hull=0.03, api_key=self.api_key)
+        cp = chemical_potentials.CompetingPhases("ZrO2", energy_above_hull=0.03, api_key=api_key)
         # potcar spec doesn't need potcars set up for pmg and it still works
         cp.convergence_setup(potcar_spec=True)
         assert len(cp.metallic_entries) == 6
@@ -286,7 +295,7 @@ class CompetingPhasesTestCase(unittest.TestCase):
             assert any(line == "NSW = 0\n" for line in contents)
 
     def test_vasp_std_setup(self):
-        cp = chemical_potentials.CompetingPhases("ZrO2", energy_above_hull=0.03, api_key=self.api_key)
+        cp = chemical_potentials.CompetingPhases("ZrO2", energy_above_hull=0.03, api_key=api_key)
         cp.vasp_std_setup(potcar_spec=True)
         assert len(cp.nonmetallic_entries) == 6
         assert len(cp.metallic_entries) == 6
@@ -351,15 +360,15 @@ class CompetingPhasesTestCase(unittest.TestCase):
         ]:
             with warnings.catch_warnings(record=True) as w:
                 cp = chemical_potentials.CompetingPhases(
-                    struct.composition.reduced_formula, api_key=self.api_key
+                    struct.composition.reduced_formula, api_key=api_key
                 )
-                cp_struct_input = chemical_potentials.CompetingPhases(struct, api_key=self.api_key)
+                cp_struct_input = chemical_potentials.CompetingPhases(struct, api_key=api_key)
 
-            _check_structure_input(cp, cp_struct_input, struct, name, w, self.api_key)
+            _check_structure_input(cp, cp_struct_input, struct, name, w, api_key)
 
     def test_MP_doc_dicts(self):
         cp = chemical_potentials.CompetingPhases(
-            "ZrO2", MP_doc_dicts=True, energy_above_hull=0.03, api_key=self.api_key
+            "ZrO2", MP_doc_dicts=True, energy_above_hull=0.03, api_key=api_key
         )
         assert cp.MP_doc_dicts
         assert len(cp.MP_doc_dicts) == 12  # just missing O2
@@ -373,7 +382,7 @@ class CompetingPhasesTestCase(unittest.TestCase):
 
 
 def _check_structure_input(cp, cp_struct_input, struct, name, w, api_key, extrinsic=False):
-    print([str(warning.message) for warning in w])  # for debugging
+    _print_warning_info(w)  # for debugging
     user_warnings = [warning for warning in w if warning.category is UserWarning]
     if "Cu2SiSe4" in name:
         assert len(user_warnings) == 2
@@ -418,7 +427,7 @@ class ExtrinsicCompetingPhasesTestCase(unittest.TestCase):  # same setUp and tea
 
     def test_init(self):
         ex_cp = chemical_potentials.CompetingPhases(
-            "ZrO2", extrinsic="La", energy_above_hull=0, api_key=self.api_key
+            "ZrO2", extrinsic="La", energy_above_hull=0, api_key=api_key
         )
         assert len(ex_cp.extrinsic_entries) == 2
         assert len(ex_cp.entries) == 6
@@ -431,7 +440,7 @@ class ExtrinsicCompetingPhasesTestCase(unittest.TestCase):  # same setUp and tea
         assert [entry.name for entry in ex_cp.intrinsic_entries] == self.zro2_entry_list[:4]
 
         cp = chemical_potentials.CompetingPhases(
-            "ZrO2", extrinsic="La", api_key=self.api_key
+            "ZrO2", extrinsic="La", api_key=api_key
         )  # default energy_above_hull=0.05
         assert len(cp.extrinsic_entries) == 3
         assert len(cp.entries) == 21
@@ -449,13 +458,13 @@ class ExtrinsicCompetingPhasesTestCase(unittest.TestCase):  # same setUp and tea
         ]:
             with warnings.catch_warnings(record=True) as w:
                 cp = chemical_potentials.CompetingPhases(
-                    struct.composition.reduced_formula, api_key=self.api_key, extrinsic={"K"}
+                    struct.composition.reduced_formula, api_key=api_key, extrinsic={"K"}
                 )
                 cp_struct_input = chemical_potentials.CompetingPhases(
-                    struct, api_key=self.api_key, extrinsic={"K"}
+                    struct, api_key=api_key, extrinsic={"K"}
                 )
 
-            _check_structure_input(cp, cp_struct_input, struct, name, w, self.api_key, extrinsic=True)
+            _check_structure_input(cp, cp_struct_input, struct, name, w, api_key, extrinsic=True)
 
             for entries_list in [cp_struct_input.extrinsic_entries, cp.extrinsic_entries]:
                 assert len(entries_list) >= 1
@@ -466,12 +475,9 @@ class ExtrinsicCompetingPhasesTestCase(unittest.TestCase):  # same setUp and tea
 
 class ChemPotAnalyzerTestCase(unittest.TestCase):
     def setUp(self):
-        self.EXAMPLE_DIR = os.path.join(cwd, "../examples")
-        self.DATA_DIR = os.path.join(cwd, "data")
-
-        self.zro2_path = os.path.join(self.EXAMPLE_DIR, "ZrO2_CompetingPhases")
-        self.la_zro2_path = os.path.join(self.EXAMPLE_DIR, "La_ZrO2_CompetingPhases")
-        self.mgo_path = os.path.join(self.EXAMPLE_DIR, "MgO/CompetingPhases")
+        self.zro2_path = os.path.join(EXAMPLE_DIR, "ZrO2_CompetingPhases")
+        self.la_zro2_path = os.path.join(EXAMPLE_DIR, "La_ZrO2_CompetingPhases")
+        self.mgo_path = os.path.join(EXAMPLE_DIR, "MgO/CompetingPhases")
 
         self.zro2_cpa = chemical_potentials.CompetingPhasesAnalyzer("ZrO2", self.zro2_path)
         self.la_zro2_cpa = chemical_potentials.CompetingPhasesAnalyzer("ZrO2", self.la_zro2_path)
@@ -506,7 +512,7 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
         for i in ["cpa.json"]:
             if_present_rm(i)
 
-        if_present_rm(os.path.join(self.DATA_DIR, "ZrO2_LaTeX_Tables/test.tex"))
+        if_present_rm(os.path.join(data_dir, "ZrO2_LaTeX_Tables/test.tex"))
 
         if os.path.exists(f"{self.zro2_path}/O2_EaH_0.0/vasp_std/orig_vr.xml.gz"):
             if not os.path.exists(f"{self.zro2_path}/O2_EaH_0.0/vasp_std/mismatching_incar_vr.xml.gz"):
@@ -531,7 +537,7 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
 
         if_present_rm(
             os.path.join(
-                self.DATA_DIR,
+                data_dir,
                 "Sn_in_Cs2AgBiBr6_CompetingPhases/Br_EaH=0/duplicate_for_testing_vasprun.xml.gz",
             )
         )
@@ -554,7 +560,7 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
         with warnings.catch_warnings(record=True) as w:
             unstable_cpa = chemical_potentials.CompetingPhasesAnalyzer("Zr2O", self.zro2_path)
 
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         assert (
             "Zr2O is not stable with respect to competing phases, having an energy "
             "above hull of 0.0194 eV/atom.\nFormally, this means that"
@@ -676,7 +682,7 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
 
         with warnings.catch_warnings(record=True) as w:
             chemical_potentials.CompetingPhasesAnalyzer("ZrO2", self.zro2_path)
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         assert not w
 
         for i in ["._OUTCAR", "._vasprun.xml", "._LOCPOT", ".DS_Store"]:
@@ -685,7 +691,7 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
     def test_vaspruns_none_parsed(self):
         with warnings.catch_warnings(record=True) as w, pytest.raises(FileNotFoundError) as e:
             chemical_potentials.CompetingPhasesAnalyzer("ZrO2", "./")
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         assert not w
         print(e.value)  # for debugging
         assert "No vasprun files have been parsed," in str(e.value)
@@ -698,12 +704,12 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
             assert not out
             assert not w
 
-            with open(f"{self.DATA_DIR}/ZrO2_LaTeX_Tables/test.tex", "w+") as f:
+            with open(f"{data_dir}/ZrO2_LaTeX_Tables/test.tex", "w+") as f:
                 f.write(text)
 
             with (
-                open(f"{self.DATA_DIR}/ZrO2_LaTeX_Tables/{ref_filename}") as reference_f,
-                open(f"{self.DATA_DIR}/ZrO2_LaTeX_Tables/test.tex") as test_f,
+                open(f"{data_dir}/ZrO2_LaTeX_Tables/{ref_filename}") as reference_f,
+                open(f"{data_dir}/ZrO2_LaTeX_Tables/test.tex") as test_f,
             ):
                 assert reference_f.read() == test_f.read()
 
@@ -884,13 +890,13 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
     def test_general_cpa_reloading(self):
         with warnings.catch_warnings(record=True) as w:
             cpa = chemical_potentials.CompetingPhasesAnalyzer("ZrO2", self.zro2_path)
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         assert not w
         self._general_cpa_check(cpa)
 
         with warnings.catch_warnings(record=True) as w:
             la_cpa = chemical_potentials.CompetingPhasesAnalyzer("ZrO2", self.la_zro2_path)
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         assert not w
         self._general_cpa_check(la_cpa)
 
@@ -912,7 +918,7 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
 
         with warnings.catch_warnings(record=True) as w:
             cpa = chemical_potentials.CompetingPhasesAnalyzer("ZrO2", self.zro2_path)
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         expected_mismatching_info = [
             "There are mismatching INCAR tags",
             "['O2']:",
@@ -928,7 +934,7 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
             cpa = chemical_potentials.CompetingPhasesAnalyzer(
                 "ZrO2", self.zro2_path, check_compatibility=False
             )
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         assert not w
         self._general_cpa_check(cpa)
 
@@ -940,13 +946,13 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
 
         with warnings.catch_warnings(record=True) as w:
             la_cpa = chemical_potentials.CompetingPhasesAnalyzer("ZrO2", self.la_zro2_path)
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         assert all(any(i in str(warning.message) for warning in w) for i in expected_mismatching_info)
         self._general_cpa_check(la_cpa)
 
         with warnings.catch_warnings(record=True) as w:
             mgo_cpa = chemical_potentials.CompetingPhasesAnalyzer("MgO", self.mgo_path)
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         assert all(
             any(i in str(warning.message) for warning in w)
             for i in [
@@ -976,7 +982,7 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
 
         with warnings.catch_warnings(record=True) as w:
             cpa = chemical_potentials.CompetingPhasesAnalyzer("ZrO2", self.zro2_path)
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         assert all(
             any(i in str(warning.message) for warning in w)
             for i in [
@@ -993,7 +999,7 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
             cpa = chemical_potentials.CompetingPhasesAnalyzer(
                 "ZrO2", self.zro2_path, check_compatibility=False
             )
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         assert not w
         self._general_cpa_check(cpa)
 
@@ -1017,30 +1023,26 @@ class ChemPotAnalyzerTestCase(unittest.TestCase):
         for many warnings/issues to be handled).
         """
         shutil.copyfile(
-            f"{self.DATA_DIR}/Sn_in_Cs2AgBiBr6_CompetingPhases/Br_EaH=0/vasprun.xml.gz",
-            f"{self.DATA_DIR}/Sn_in_Cs2AgBiBr6_CompetingPhases/Br_EaH=0/duplicate_for_testing_vasprun.xml.gz",
+            f"{data_dir}/Sn_in_Cs2AgBiBr6_CompetingPhases/Br_EaH=0/vasprun.xml.gz",
+            f"{data_dir}/Sn_in_Cs2AgBiBr6_CompetingPhases/Br_EaH=0/duplicate_for_testing_vasprun.xml.gz",
         )
         with warnings.catch_warnings(record=True) as w:
             cpa = chemical_potentials.CompetingPhasesAnalyzer(
-                "Cs2AgBiBr6", f"{self.DATA_DIR}/Sn_in_Cs2AgBiBr6_CompetingPhases"
+                "Cs2AgBiBr6", f"{data_dir}/Sn_in_Cs2AgBiBr6_CompetingPhases"
             )
-        print([str(warning.message) for warning in w])  # for debugging
+        _print_warning_info(w)  # for debugging
         for expected_warning in [
             f"Multiple `vasprun.xml` files found in directory: "
-            f"{self.DATA_DIR}/Sn_in_Cs2AgBiBr6_CompetingPhases/Br_EaH=0",
-            f"vasprun.xml file at {self.DATA_DIR}/Sn_in_Cs2AgBiBr6_CompetingPhases/Bi_EaH=0/vasprun.xml.gz"
+            f"{data_dir}/Sn_in_Cs2AgBiBr6_CompetingPhases/Br_EaH=0",
+            f"vasprun.xml file at {data_dir}/Sn_in_Cs2AgBiBr6_CompetingPhases/Bi_EaH=0/vasprun.xml.gz"
             f" is corrupted/incomplete. Attempting to continue parsing but may fail!",
             "There are mismatching INCAR tags for (some of) your competing phases calculations which are "
             "likely to cause errors in the parsed results (energies & thus chemical potential limits). "
             "Found the following differences:\n"
             "(in the format: 'Entries: (INCAR tag, value in entry calculation, value in reference "
             "calculation))':\n",
-            "['Ag', 'Sn']:\n[('ADDGRID', True, False), ('HFSCREEN', 0.2, 0.207), ('LASPH', True, False), "
-            "('NKRED', 2, 1)]",
-            "['AgBr', 'Br', 'Cs', 'Cs2AgBr3', 'Cs3Bi2Br9', 'CsAgBr3']:\n[('ADDGRID', True, False), "
-            "('HFSCREEN', 0.2, 0.207), ('LASPH', True, False)]",
-            "['Bi']:\n[('ADDGRID', True, False), ('HFSCREEN', 0.2, 0.207), ('LASPH', True, False), "
-            "('NKRED', 3, 1)]",
+            "['Ag', 'AgBr', 'Bi', 'Br', 'Cs', 'Cs2AgBr3', 'Cs3Bi2Br9', 'CsAgBr3', 'Sn']:\n[('ADDGRID', "
+            "True, False), ('HFSCREEN', 0.2, 0.207), ('LASPH', True, False)]",
             "Where Cs2AgBiBr6 was used as the reference entry calculation.",
             "In general, the same INCAR settings should be used in all final calculations for these tags "
             "which can affect energies!",
@@ -1112,11 +1114,33 @@ def _check_form_e_df(
 
 
 class TestChemicalPotentialGrid(unittest.TestCase):
-    def setUp(self):
-        self.EXAMPLE_DIR = os.path.join(cwd, "../examples")
-        self.chempots = loadfn(os.path.join(self.EXAMPLE_DIR, "Cu2SiSe3/Cu2SiSe3_chempots.json"))
-        self.grid = chemical_potentials.ChemicalPotentialGrid(self.chempots)
-        self.api_key = "UsPX9Hwut4drZQXPTxk4CwlCstrAAjDv"
+    @classmethod
+    def setUpClass(cls):
+        cls.chempots = loadfn(os.path.join(EXAMPLE_DIR, "Cu2SiSe3/Cu2SiSe3_chempots.json"))
+        cls.grid = chemical_potentials.ChemicalPotentialGrid(cls.chempots)
+        cls.api_key = "UsPX9Hwut4drZQXPTxk4CwlCstrAAjDv"
+        cls.na2fepo4f_cp = chemical_potentials.CompetingPhases("Na2FePO4F", api_key=cls.api_key)
+        na2fepo4f_doped_chempots = chemical_potentials.get_doped_chempots_from_entries(
+            cls.na2fepo4f_cp.entries, "Na2FePO4F"
+        )
+        cls.na2fepo4f_grid = chemical_potentials.ChemicalPotentialGrid(
+            na2fepo4f_doped_chempots,
+        )
+        cls.cpa_folder = os.path.join(data_dir, "ChemPotAnalyzers")
+        cls.AgSbTe2_cpa = loadfn(os.path.join(cls.cpa_folder, "AgSbTe2_partial_cpa.json"))
+        cls.LiPS4_cpa = loadfn(os.path.join(cls.cpa_folder, "LiPS4_cpa.json"))
+        cls.Sn_in_Cs2AgBiBr6_ncl_cpa = loadfn(
+            os.path.join(cls.cpa_folder, "Sn_in_Cs2AgBiBr6_ncl_cpa.json")
+        )
+        cls.Sn_in_Cs2AgBiBr6_std_cpa = loadfn(
+            os.path.join(cls.cpa_folder, "Sn_in_Cs2AgBiBr6_std_cpa.json")
+        )
+        cls.zro2_path = os.path.join(EXAMPLE_DIR, "ZrO2_CompetingPhases")
+        cls.zro2_cpa = chemical_potentials.CompetingPhasesAnalyzer("ZrO2", cls.zro2_path)
+        # Note we also have Cs2SnBr6 competing phase energies csv in JOSS data folder if needed for tests
+
+    def tearDown(self):
+        if_present_rm("test.png")
 
     def test_init(self):
         assert isinstance(self.grid.vertices, pd.DataFrame)
@@ -1127,18 +1151,213 @@ class TestChemicalPotentialGrid(unittest.TestCase):
         assert np.isclose(min(self.grid.vertices["μ_Cu (eV)"]), -0.463558, rtol=1e-5)
         assert np.isclose(min(self.grid.vertices["μ_Si (eV)"]), -1.708951, rtol=1e-5)
         assert np.isclose(min(self.grid.vertices["μ_Se (eV)"]), -0.758105, rtol=1e-5)
+        assert np.isclose(np.mean(self.grid.vertices["μ_Cu (eV)"]), -0.1917, rtol=1e-2)
+        assert np.isclose(np.mean(self.grid.vertices["μ_Si (eV)"]), -1.0277, rtol=1e-2)
+        assert np.isclose(np.mean(self.grid.vertices["μ_Se (eV)"]), -0.37004, rtol=1e-2)
 
     def test_get_grid(self):
-        grid_df = self.grid.get_grid(100)
-        assert isinstance(grid_df, pd.DataFrame)
-        assert len(self.grid.vertices) == 7
-        assert np.isclose(max(self.grid.vertices["μ_Cu (eV)"]), 0.0)
-        assert np.isclose(max(self.grid.vertices["μ_Si (eV)"]), -0.077858, rtol=1e-5)
-        assert np.isclose(max(self.grid.vertices["μ_Se (eV)"]), 0.0)
-        assert np.isclose(min(self.grid.vertices["μ_Cu (eV)"]), -0.463558, rtol=1e-5)
-        assert np.isclose(min(self.grid.vertices["μ_Si (eV)"]), -1.708951, rtol=1e-5)
-        assert np.isclose(min(self.grid.vertices["μ_Se (eV)"]), -0.758105, rtol=1e-5)
-        assert len(grid_df) == 3886
+        for cart in [True, False]:
+            print(f"Testing grid with cartesian={cart}")
+            grid_df = self.grid.get_grid(3800, cartesian=cart)
+            assert isinstance(grid_df, pd.DataFrame)
+            assert np.isclose(max(grid_df["μ_Cu (eV)"]), 0.0)
+            assert np.isclose(max(grid_df["μ_Si (eV)"]), -0.0759, atol=1e-2)
+            assert np.isclose(max(grid_df["μ_Se (eV)"]), 0.0)
+            assert np.isclose(min(grid_df["μ_Cu (eV)"]), -0.463558, atol=1e-2)
+            assert np.isclose(min(grid_df["μ_Si (eV)"]), -1.708951, atol=1e-2)
+            assert np.isclose(min(grid_df["μ_Se (eV)"]), -0.758105, atol=1e-2)
+            assert np.isclose(np.mean(grid_df["μ_Cu (eV)"]), -0.19661, atol=1e-3 if cart else 2e-2)
+            assert np.isclose(np.mean(grid_df["μ_Si (eV)"]), -0.94969, atol=1e-3 if cart else 2e-1)
+            assert np.isclose(np.mean(grid_df["μ_Se (eV)"]), -0.39294, atol=1e-3 if cart else 7e-2)
+
+            assert len(grid_df) == (3792 if cart else 3744)
+
+    def test_chempot_heatmap_3D_w_fixed_elements_error(self):
+        with pytest.raises(ValueError) as exc:
+            self.LiPS4_cpa.plot_chempot_heatmap(fixed_elements={"Li": -0.5})
+        assert (
+            "Chemical potential heatmap plotting requires 3-D data, requiring fixed chemical potential "
+            "constraints for >ternary systems; such that the number of elements in the chemical system "
+            "(3) minus the number of fixed chemical potentials (1) must be equal to 3." in str(exc.value)
+        )
+
+    def test_chempot_heatmap_3D_w_fixed_elements_error_wrong_element(self):
+        with pytest.raises(ValueError) as exc:
+            self.LiPS4_cpa.plot_chempot_heatmap(fixed_elements={"Cd": -0.5})
+        assert "Chemical potential heatmap plotting requires 3-D data" in str(exc.value)
+        assert "(3) minus the number of fixed chemical potentials (1)" in str(exc.value)
+
+    def test_chempot_heatmap_4D_w_fixed_elements_error_wrong_element(self):
+        with pytest.raises(ValueError) as exc:
+            self.Sn_in_Cs2AgBiBr6_ncl_cpa.plot_chempot_heatmap(fixed_elements={"Cd": -0.5})
+        assert "Cd (eV)' is not in list" in str(exc.value)
+
+    def test_chempot_heatmap_4D_w_fixed_elements_error(self):
+        with pytest.raises(ValueError) as exc:
+            self.Sn_in_Cs2AgBiBr6_ncl_cpa.plot_chempot_heatmap(fixed_elements={"Cs": -0.5, "Ag": -0.5})
+        assert "Chemical potential heatmap plotting requires 3-D data" in str(exc.value)
+        assert "(4) minus the number of fixed chemical potentials (2)" in str(exc.value)
+
+    def test_chempot_heatmap_2D_error(self):
+        with pytest.raises(ValueError) as exc:  # this will likely change with updated code
+            self.zro2_cpa.plot_chempot_heatmap()
+        assert (
+            "Chemical potential heatmap (i.e. 2D) plotting is not possible for a binary system! You "
+            "can use ``cpd = ChemicalPotentialDiagram(cpa.entries); cpd.get_plot()`` to generate a "
+            "line plot of the chemical potentials as shown in the doped competing phases tutorial."
+            in str(exc.value)
+        )
+
+    def test_chempot_heatmap_4D_w_fixed_elements_outside_range(self):
+        with pytest.raises(ValueError) as exc:
+            self.Sn_in_Cs2AgBiBr6_ncl_cpa.plot_chempot_heatmap(fixed_elements={"Ag": -25})
+        assert (
+            "The input set of fixed chemical potentials does not intersect with the convex hull (i.e. "
+            "stable chemical potential range) of the host material." in str(exc.value)
+        )
+
+    @custom_mpl_image_compare(filename="AgSbTe2_chempot_heatmap_default.png")
+    def test_AgSbTe2_chempot_heatmap_default(self):
+        return plot_chempot_heatmap_and_test_no_warnings(self.AgSbTe2_cpa)
+
+    @custom_mpl_image_compare(
+        filename="AgSbTe2_chempot_heatmap_custom.png",
+        style=f"{module_path}/../doped/utils/displacement.mplstyle",
+    )
+    def test_AgSbTe2_chempot_heatmap_custom(self):
+        plot = plot_chempot_heatmap_and_test_no_warnings(
+            self.AgSbTe2_cpa,
+            dependent_element="Ag",
+            xlim=(-0.5, 0.0),
+            ylim=(-0.4, 0.0),
+            cbar_range=(-0.4, 0.0),
+            colormap="viridis",
+            padding=0.05,
+            title=True,
+            label_positions=False,
+            filename="test.png",
+            style_file=f"{module_path}/../doped/utils/displacement.mplstyle",
+        )
+        assert os.path.exists("test.png")
+        return plot
+
+    @custom_mpl_image_compare(
+        filename="AgSbTe2_chempot_heatmap_custom.png",
+        style=f"{module_path}/../doped/utils/displacement.mplstyle",
+    )
+    def test_AgSbTe2_chempot_heatmap_custom_w_direct_function(self):
+        plot, output, w = _run_func_and_capture_stdout_warnings(
+            chemical_potentials.plot_chempot_heatmap,
+            self.AgSbTe2_cpa.chempots,
+            composition="AgSbTe2",
+            dependent_element="Ag",
+            xlim=(-0.5, 0.0),
+            ylim=(-0.4, 0.0),
+            cbar_range=(-0.4, 0.0),
+            colormap="viridis",
+            padding=0.05,
+            title=True,
+            label_positions=False,
+            filename="test.png",
+            style_file=f"{module_path}/../doped/utils/displacement.mplstyle",
+        )
+        assert not w
+        assert not output
+        assert os.path.exists("test.png")
+        return plot
+
+    @custom_mpl_image_compare(filename="LiPS4_chempot_heatmap_default.png")
+    def test_LiPS4_chempot_heatmap_default(self):
+        return plot_chempot_heatmap_and_test_no_warnings(self.LiPS4_cpa)
+
+    @custom_mpl_image_compare(filename="LiPS4_chempot_heatmap_custom.png")
+    def test_LiPS4_chempot_heatmap_custom(self):
+        return plot_chempot_heatmap_and_test_no_warnings(
+            self.LiPS4_cpa,
+            dependent_element="Li",
+            padding=0.1,
+            title=False,
+            label_positions=True,
+        )
+
+    @custom_mpl_image_compare(filename="Sn_in_Cs2AgBiBr6_ncl_chempot_heatmap_default.png")
+    def test_Sn_in_Cs2AgBiBr6_ncl_chempot_heatmap_default(self):
+        return plot_chempot_heatmap_and_test_no_warnings(
+            self.Sn_in_Cs2AgBiBr6_ncl_cpa, fixed_elements={"Cs": -3.3815}
+        )
+
+    @custom_mpl_image_compare(
+        filename="Sn_in_Cs2AgBiBr6_ncl_chempot_heatmap_custom.png",
+        style=f"{module_path}/../doped/utils/displacement.mplstyle",
+    )
+    def test_Sn_in_Cs2AgBiBr6_ncl_chempot_heatmap_custom(self):
+        """
+        Test customising the heatmap for a 4-D system, with custom label
+        positions.
+
+        Same example used in the plotting customisation tutorial.
+        """
+        return plot_chempot_heatmap_and_test_no_warnings(
+            self.Sn_in_Cs2AgBiBr6_ncl_cpa,
+            fixed_elements={"Cs": -3.3815},
+            dependent_element="Bi",  # change dependent (colourbar) element
+            xlim=(-0.4, 0.0),
+            ylim=(-0.6, -0.2),
+            cbar_range=(-2, -1),
+            colormap="navia",
+            padding=0.05,
+            title=True,
+            label_positions={
+                "CsAgBr3": (-0.3, 0.025),
+                "AgBr": (-0.16, 0.0),
+                "Cs3Bi2Br9": (-0.1, -0.05),
+            },  # custom label positions
+            style_file=f"{module_path}/../doped/utils/displacement.mplstyle",
+        )
+
+    @custom_mpl_image_compare(
+        filename="Sn_in_Cs2AgBiBr6_ncl_chempot_heatmap_auto_centroid.png",
+        style=f"{module_path}/../doped/utils/displacement.mplstyle",
+    )
+    def test_Sn_in_Cs2AgBiBr6_ncl_chempot_heatmap_auto_centroid(self):
+        """
+        Test customising the heatmap for a 4-D system, with custom label
+        positions.
+
+        Same example used in the plotting customisation tutorial.
+        """
+        return plot_chempot_heatmap_and_test_no_warnings(
+            self.Sn_in_Cs2AgBiBr6_ncl_cpa, dependent_element="Cs"
+        )
+
+    @custom_mpl_image_compare(filename="Sn_in_Cs2AgBiBr6_std_chempot_heatmap_custom.png")
+    def test_Sn_in_Cs2AgBiBr6_std_chempot_heatmap_custom(self):
+        return plot_chempot_heatmap_and_test_no_warnings(
+            self.Sn_in_Cs2AgBiBr6_std_cpa,
+            fixed_elements={"Cs": -3.3815},
+            xlim=(-0.45, 0),
+            ylim=(-2.35, -0.9),
+            cbar_range=(-0.57, -0.3),
+            label_positions=False,
+        )
+
+    @custom_mpl_image_compare(filename="Na2FePO4F_chempot_heatmap.png")
+    def test_5D_fixed_elements_heatmap(self):
+        na2fepo4f_cpa = chemical_potentials.CompetingPhasesAnalyzer(
+            "Na2FePO4F", entries=self.na2fepo4f_cp.entries
+        )
+        return plot_chempot_heatmap_and_test_no_warnings(
+            na2fepo4f_cpa, fixed_elements={"Na": -1.9, "P": -1.3}
+        )
+
+    @custom_mpl_image_compare(filename="Na2FePO4F_chempot_heatmap_no_bordering.png")
+    def test_no_bordering_heatmap(self):
+        na2fepo4f_cpa = chemical_potentials.CompetingPhasesAnalyzer(
+            "Na2FePO4F", entries=self.na2fepo4f_cp.entries
+        )
+        return plot_chempot_heatmap_and_test_no_warnings(
+            na2fepo4f_cpa, fixed_elements={"Na": -1.9, "P": -1.3}, bordering_phases=False
+        )
 
     @custom_mpl_image_compare(filename="Na2FePO4F_chempot_grid.png")
     def test_Na2FePO4F_chempot_grid(self):
@@ -1146,36 +1365,39 @@ class TestChemicalPotentialGrid(unittest.TestCase):
         Test ``ChemicalPotentialGrid`` generation and plotting for a complex
         quinary system (Na2FePO4F).
         """
-        na2fepo4f_cp = chemical_potentials.CompetingPhases("Na2FePO4F", api_key=self.api_key)
-        na2fepo4f_doped_chempots = chemical_potentials.get_doped_chempots_from_entries(
-            na2fepo4f_cp.entries, "Na2FePO4F"
-        )
-        chempot_grid = chemical_potentials.ChemicalPotentialGrid(na2fepo4f_doped_chempots)
-        grid_df = chempot_grid.get_grid(100)
+        grid_df = self.na2fepo4f_grid.get_grid(1e8, drop_duplicates=False)
+        return _plot_Na2FePO4F_chempot_grid(grid_df, atol=0.01)
 
-        # get the average Fe and P chempots, then plot a heatmap plot of the others at these fixed values:
-        mean_mu_Fe = grid_df["μ_Fe (eV)"].mean()
-        mean_mu_P = grid_df["μ_P (eV)"].mean()
-
-        fixed_chempot_df = grid_df[
-            (np.isclose(grid_df["μ_Fe (eV)"], mean_mu_Fe, atol=0.05))
-            & (np.isclose(grid_df["μ_P (eV)"], mean_mu_P, atol=0.05))
-        ]
-
-        fig, ax = plt.subplots()
-        sc = ax.scatter(
-            fixed_chempot_df["μ_Na (eV)"],
-            fixed_chempot_df["μ_O (eV)"],
-            c=fixed_chempot_df["μ_F (eV)"],
-            cmap="viridis",
-        )
-        fig.colorbar(sc, ax=ax, label="μ$_F$ (eV)")
-        ax.set_xlabel("μ$_{Na}$ (eV)")
-        ax.set_ylabel("μ$_{O}$ (eV)")
-        return fig
-
-        # TODO: Use this as a plotting example in chemical potentials tutorial
+    @custom_mpl_image_compare(filename="Na2FePO4F_chempot_grid_cartesian.png")
+    def test_Na2FePO4F_chempot_grid_cartesian(self):
+        """
+        Test ``ChemicalPotentialGrid`` generation and plotting for a complex
+        quinary system (Na2FePO4F).
+        """
+        grid_df = self.na2fepo4f_grid.get_grid(2e5, cartesian=True)
+        return _plot_Na2FePO4F_chempot_grid(grid_df)
 
 
-# TODO: Use Cs2SnBr6 competing phase energies csv in JOSS data folder and LiPS4 data for test cases with
-#  chempot plotting etc
+def _plot_Na2FePO4F_chempot_grid(grid_df, atol=0.05):
+    # get the average Fe and P chempots, then plot a heatmap plot of the others at these fixed values:
+    middle_mu_Fe = (
+        grid_df["μ_Fe (eV)"].min() + (grid_df["μ_Fe (eV)"].max() - grid_df["μ_Fe (eV)"].min()) / 2
+    )
+    middle_mu_P = grid_df["μ_P (eV)"].min() + (grid_df["μ_P (eV)"].max() - grid_df["μ_P (eV)"].min()) / 2
+
+    fixed_chempot_df = grid_df[
+        (np.isclose(grid_df["μ_Fe (eV)"], middle_mu_Fe, atol=atol))
+        & (np.isclose(grid_df["μ_P (eV)"], middle_mu_P, atol=atol))
+    ]
+
+    fig, ax = plt.subplots()
+    sc = ax.scatter(
+        fixed_chempot_df["μ_Na (eV)"],
+        fixed_chempot_df["μ_O (eV)"],
+        c=fixed_chempot_df["μ_F (eV)"],
+        cmap="viridis",
+    )
+    fig.colorbar(sc, ax=ax, label="μ$_F$ (eV)")
+    ax.set_xlabel("μ$_{Na}$ (eV)")
+    ax.set_ylabel("μ$_{O}$ (eV)")
+    return fig

@@ -7,7 +7,6 @@ tests much of the plotting functionality.
 """
 
 import os
-import shutil
 import unittest
 import warnings
 from copy import deepcopy
@@ -15,7 +14,8 @@ from copy import deepcopy
 import matplotlib as mpl
 import pytest
 from monty.serialization import loadfn
-from test_thermodynamics import DefectThermodynamicsSetupMixin, custom_mpl_image_compare, data_dir
+from test_thermodynamics import DefectThermodynamicsSetupMixin
+from test_utils import EXAMPLE_DIR, custom_mpl_image_compare, data_dir
 
 from doped import analysis
 from doped.thermodynamics import DefectThermodynamics
@@ -24,26 +24,13 @@ from doped.utils import plotting
 mpl.use("Agg")  # don't show interactive plots if testing from CLI locally
 
 
-def if_present_rm(path):
-    """
-    Remove file or directory if it exists.
-    """
-    if os.path.exists(path):
-        if os.path.isfile(path):
-            os.remove(path)
-        elif os.path.isdir(path):
-            shutil.rmtree(path)
-
-
 class DefectPlottingTestCase(unittest.TestCase):
     def setUp(self):
-        self.module_path = os.path.dirname(os.path.abspath(__file__))
-        self.EXAMPLE_DIR = os.path.join(self.module_path, "../examples")
-        self.CdTe_EXAMPLE_DIR = os.path.join(self.module_path, "../examples/CdTe")
-        self.CdTe_thermo = loadfn(f"{self.CdTe_EXAMPLE_DIR}/CdTe_example_thermo.json")
-        self.CdTe_chempots = loadfn(f"{self.CdTe_EXAMPLE_DIR}/CdTe_chempots.json")
-        self.YTOS_EXAMPLE_DIR = os.path.join(self.module_path, "../examples/YTOS")
-        self.YTOS_thermo = loadfn(f"{self.YTOS_EXAMPLE_DIR}/YTOS_example_thermo.json")
+        self.CdTe_EXAMPLE_DIR = os.path.join(EXAMPLE_DIR, "CdTe")
+        self.CdTe_thermo = loadfn(os.path.join(self.CdTe_EXAMPLE_DIR, "CdTe_example_thermo.json"))
+        self.CdTe_chempots = loadfn(os.path.join(self.CdTe_EXAMPLE_DIR, "CdTe_chempots.json"))
+        self.YTOS_EXAMPLE_DIR = os.path.join(EXAMPLE_DIR, "YTOS")
+        self.YTOS_thermo = loadfn(os.path.join(self.YTOS_EXAMPLE_DIR, "YTOS_example_thermo.json"))
 
     @custom_mpl_image_compare(filename="CdTe_example_defects_plot.png")
     def test_plot_CdTe(self):
@@ -295,6 +282,7 @@ class DefectPlottingTestCase(unittest.TestCase):
             "vac_14_Th_+2": "$\\it{V}\\!$ $_{Th}^{+2}$",
             "As_i_C2_-3": "As$_i^{-3}$",
             "Ag_i_C3v_Ag2.40_0": "Ag$_i^{0}$",
+            "Ga_O_C1_Ga1.93Ga2.08O2.62aas_0": "Ga$_{O}^{0}$",
         }
 
         for defect_species, expected_name in defect_species_name_dict.items():
@@ -374,6 +362,7 @@ class DefectPlottingTestCase(unittest.TestCase):
             "vac_14_Th_+2": "$\\it{V}\\!$ $_{Th_{14}}^{+2}$",
             "As_i_C2_-3": "As$_{i_{C_{2}}}^{-3}$",
             "Ag_i_C3v_Ag2.40_0": "Ag$_{i_{C_{3v}-Ag2.40}}^{0}$",
+            "Ga_O_C1_Ga1.93Ga2.08O2.62aas_0": "Ga$_{O_{C_{1}-Ga1.93Ga2.08O2.62aas}}^{0}$",
         }
         for (
             defect_species,
@@ -420,7 +409,7 @@ class DefectThermodynamicsPlotsTestCase(DefectThermodynamicsSetupMixin):
         )
 
         cls.orig_Se_amalgamated_extrinsic_thermo = DefectThermodynamics.from_json(
-            f"{cls.EXAMPLE_DIR}/Se/Se_Amalgamated_Extrinsic_Thermo.json.gz"
+            f"{EXAMPLE_DIR}/Se/Se_Amalgamated_Extrinsic_Thermo.json.gz"
         )
         cls.orig_Bi_Se_thermo = loadfn(f"{data_dir}/Bi_Se_BiSeI_thermo.json.gz")
 
@@ -616,29 +605,6 @@ class DefectThermodynamicsPlotsTestCase(DefectThermodynamicsSetupMixin):
 
         return defect_thermo.plot(self.CdTe_chempots, limit="Cd-rich")
 
-    @custom_mpl_image_compare(filename="Se_duplicate_entry_names_old_plot.png")
-    def test_handling_duplicate_entry_names_ext_Se_old_names(self):
-        """
-        Test renaming behaviour when defect entries with the same names are
-        provided.
-
-        In this case, the defect folder/entry names match the old ``doped``
-        format, with e.g. ``sub_1_Br_on_Se_-1`` and ``inter_2_O_0`` etc.
-
-        We have some duplicates (``inter_1_O_0`` and ``inter_2_O_0``) which
-        are removed by including site info, but some (``inter_11_H_X``) which
-        aren't, so ``_a`` & ``_b`` are appended to those names.
-        """
-        thermo = deepcopy(self.Se_ext_no_pnict_thermo)  # don't overwrite
-        thermo.dist_tol = 1.45  # keeps O_i sites separate but merges F/Cl/Br_i
-        fig = thermo.plot()
-        legend_txt = [t.get_text() for t in fig.get_axes()[0].get_legend().get_texts()]
-        print(legend_txt)
-        for i in ["O$_{i_{1}}$", "O$_{i_{2}}$", "H$_i$$_{-a}$", "H$_i$$_{-b}$"]:
-            assert i in legend_txt
-
-        return fig
-
     @custom_mpl_image_compare(filename="Se_pnictogen_plot.png")
     def test_plotting_ext_Se_new_names(self):
         """
@@ -673,10 +639,10 @@ class DefectThermodynamicsPlotsTestCase(DefectThermodynamicsSetupMixin):
         legend_txt = [t.get_text() for t in fig.get_axes()[0].get_legend().get_texts()]
         print(legend_txt)
         for i in [
-            "O$_{i_{1}}$",
+            "O$_{i_{2}}$",
             "Te$_{Se_{1}}$",
-            "H$_{i_{11}}$$_{-a}$",
-            "H$_{i_{11}}$$_{-b}$",
+            "H$_{i_{11}}$",
+            "H$_{i_{12}}$",
             "F$_{i_{1}}$",
         ]:
             assert i in legend_txt
@@ -729,8 +695,24 @@ class DefectThermodynamicsPlotsTestCase(DefectThermodynamicsSetupMixin):
         Test plotting behaviour with non-pnictogen impurities in Se, with
         ``unstable_entries=False`` (no shallow within default tol, and no non
         in-gap stable).
+
+        Here we also test the renaming behaviour when defect clusters with the
+        same (representative) name occur.
         """
-        return self.Se_ext_no_pnict_thermo.plot(unstable_entries=False, ylim=(0, 2.5))
+        fig = self.Se_ext_no_pnict_thermo.plot(unstable_entries=False, ylim=(0, 2.5))
+        legend_txt = [t.get_text() for t in fig.get_axes()[0].get_legend().get_texts()]
+        print(legend_txt)
+        for i in [
+            "O$_i$",
+            "H$_i$$_{-a}$",
+            "H$_i$$_{-b}$",
+            "Br$_i$",
+            "F$_i$$_{-a}$",
+            "F$_i$$_{-b}$",
+        ]:
+            assert i in legend_txt
+
+        return fig
 
     def test_unstable_entries_error(self):
         """

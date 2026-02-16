@@ -9,10 +9,14 @@ calculations, with publication-quality outputs.
 
 import contextlib
 import os
+import re
 import warnings
 from copy import deepcopy
+from pathlib import Path
+from typing import Any
 
 import numpy as np
+import pandas as pd
 from monty.json import MontyDecoder
 from monty.serialization import dumpfn
 from pymatgen.analysis.defects import core
@@ -51,6 +55,7 @@ from doped.utils.parsing import (
     check_atom_mapping_far_from_defect,
     get_core_potentials_from_outcar,
     get_defect_type_site_idxs_and_unrelaxed_structure,
+    get_dimer_bonds,
     get_locpot,
     get_matching_site,
     get_procar,
@@ -97,6 +102,15 @@ _aniso_dielectric_but_using_locpot_warning = (
     "effective isotropic average of the supplied anisotropic dielectric. This could lead to significant "
     "errors for very anisotropic systems and/or relatively small supercells!"
 )
+
+_CALC_OUTPUT_MASK = ("vasprun.xml", "vasprun.xml.gz")  # mask for identifying calculation files
+_SUBFOLDER_PRIORITY = [
+    "vasp_ncl",
+    "vasp_std",
+    "vasp_nkred_std",
+    "vasp_gam",
+]  # priority order for subfolders
+_BULK_FOLDER_PATTERN = "bulk"
 
 
 def _convert_dielectric_to_tensor(dielectric: float | np.ndarray | list) -> np.ndarray:
@@ -440,31 +454,32 @@ def defect_and_info_from_structures(
             not required.
 
     Returns:
-        defect (Defect):
-            ``doped`` ``Defect`` object.
-        defect_site (Site):
-            ``pymatgen`` ``Site`` object of the `relaxed` defect site in the
-            defect supercell.
-        defect_structure_metadata (dict):
-            Dictionary containing metadata about the defect structure,
-            including:
+        tuple[Defect, PeriodicSite, dict]:
+            defect (Defect):
+                ``doped`` ``Defect`` object.
+            defect_site (Site):
+                ``pymatgen`` ``Site`` object of the `relaxed` defect site in
+                the defect supercell.
+            defect_structure_metadata (dict):
+                Dictionary containing metadata about the defect structure,
+                including:
 
-            - ``guessed_initial_defect_structure``: The guessed initial defect
-              structure (before relaxation).
-            - ``guessed_defect_displacement``: Displacement from the guessed
-              initial defect site to the final `relaxed` site (``None`` for
-              vacancies).
-            - ``defect_site_index``: Index of the defect site in the defect
-              supercell (``None`` for vacancies).
-            - ``bulk_site_index``: Index of the defect site in the bulk
-              supercell (``None`` for interstitials).
-            - ``unrelaxed_defect_structure``: The unrelaxed defect structure
-              (similar to ``guessed_initial_defect_structure``, but with
-              interstitials at their final `relaxed` positions, and all bulk
-              atoms at their unrelaxed positions).
-            - ``bulk_site``: The defect site in the bulk supercell (i.e.
-              unrelaxed vacancy/substitution site, or final `relaxed` site for
-              interstitials).
+                - ``guessed_initial_defect_structure``: The guessed initial
+                  defect structure (before relaxation).
+                - ``guessed_defect_displacement``: Displacement from the
+                  guessed initial defect site to the final `relaxed` site
+                  (``None`` for vacancies).
+                - ``defect_site_index``: Index of the defect site in the defect
+                  supercell (``None`` for vacancies).
+                - ``bulk_site_index``: Index of the defect site in the bulk
+                  supercell (``None`` for interstitials).
+                - ``unrelaxed_defect_structure``: The unrelaxed defect
+                  structure (similar to ``guessed_initial_defect_structure``,
+                  but with interstitials at their final `relaxed` positions,
+                  and all bulk atoms at their unrelaxed positions).
+                - ``bulk_site``: The defect site in the bulk supercell (i.e.
+                  unrelaxed vacancy/substitution site, or final `relaxed` site
+                  for interstitials).
     """
     defect_structure_metadata = {}
 
@@ -790,7 +805,7 @@ class DefectsParser:
 
 class DefectParser:
     """
-    This is the user-interface class that returns the relevant code class (DefectParserVasp etc.). 
+    This is the user-interface class that returns the relevant code class (DefectParserVasp etc.).
     For exact arguments, see help for corresponding code class DefectParserEspresso e.g.
     """
     def __new__(cls, code: Literal["vasp", "espresso"], **kwargs):
@@ -809,7 +824,7 @@ from abc import ABC, abstractmethod
 
 class BaseDefectsParser(ABC):
     """"
-    The base implementation on which DefectsParserVasp and DefectsParserEspresso are actually to be implemented. 
+    The base implementation on which DefectsParserVasp and DefectsParserEspresso are actually to be implemented.
     """
     @abstractmethod
     def parse_defects(self):
@@ -817,7 +832,7 @@ class BaseDefectsParser(ABC):
 
 class BaseDefectParser(ABC):
     """"
-    The base implementation on which DefectParserVasp and DefectParserEspresso are actually to be implemented. 
+    The base implementation on which DefectParserVasp and DefectParserEspresso are actually to be implemented.
     """
     @abstractmethod
     def parse_defects(self):
@@ -974,15 +989,15 @@ class DefectsParserVasp:
                 Keyword arguments to pass to ``DefectParser()`` methods
                 (``load_FNV_data()``, ``load_eFNV_data()``,
                 ``load_bulk_gap_data()``),
-                ``point_symmetry_from_defect_entry()`` or
-                ``defect_and_info_from_structures``, including
-                ``bulk_locpot_dict``, ``bulk_site_potentials``, ``use_MP``,
-                ``mpid``, ``api_key``, ``oxi_state``, ``multiplicity``,
-                ``angle_tolerance``, ``user_charges``,
-                ``initial_defect_structure_path`` etc. (see their docstrings);
-                or for controlling shallow defect charge correction error
-                warnings (see ``error_tolerance`` description) with
-                ``shallow_charge_stability_tolerance``.
+                ``point_symmetry_from_defect_entry()``,
+                ``defect_and_info_from_structures`` or ``get_dimer_bonds()``,
+                including ``bulk_locpot_dict``, ``bulk_site_potentials``,
+                ``use_MP``, ``mpid``, ``api_key``, ``oxi_state``,
+                ``multiplicity``, ``angle_tolerance``, ``user_charges``,
+                ``initial_defect_structure_path``, ``rtol`` etc. (see their
+                docstrings); or for controlling shallow defect charge
+                correction error warnings (see ``error_tolerance`` description)
+                with ``shallow_charge_stability_tolerance``.
                 Note that ``bulk_symprec`` can be supplied as the ``symprec``
                 value to use for determining equivalent sites (and thus defect
                 multiplicities / unrelaxed site symmetries), while an input
@@ -1000,7 +1015,8 @@ class DefectsParserVasp:
         """
         self.output_path = output_path
         self.dielectric = dielectric
-        self.skip_corrections = skip_corrections
+        self.skip_corrections = skip_corrections or self.dielectric is None
+        # warned later if no dielectric, skip_corrections = False and charge defects present
         self.error_tolerance = error_tolerance
         self.bulk_path = bulk_path
         self.subfolder = subfolder
@@ -1014,373 +1030,97 @@ class DefectsParserVasp:
         self.bulk_vr = None  # loaded later
         self.kwargs = kwargs
 
-        possible_defect_folders = [
-            dir
-            for dir in os.listdir(self.output_path)
-            if any(
-                "vasprun" in file and ".xml" in file
-                for file_list in [tup[2] for tup in os.walk(os.path.join(self.output_path, dir))]
-                for file in file_list
-            )
-        ]
+        # get folders for parsing:
+        self.defect_folders, self.output_path, self.subfolder, self.bulk_path = (
+            _get_calculation_folders_for_parsing(self.output_path, self.subfolder, self.bulk_path)
+        )
 
-        if not possible_defect_folders:  # user may have specified the defect folder directly, so check
-            # if we can dynamically determine the defect folder:
-            possible_defect_folders = [
-                dir
-                for dir in os.listdir(os.path.join(self.output_path, os.pardir))
-                if any(
-                    "vasprun" in file and ".xml" in file
-                    for file_list in [
-                        tup[2] for tup in os.walk(os.path.join(self.output_path, os.pardir, dir))
-                    ]
-                    for file in file_list
-                )
-                and (
-                    os.path.basename(self.output_path) in dir  # only that defect directory
-                    or "bulk" in str(dir).lower()  # or a bulk directory, for later
-                    or (self.bulk_path is not None and str(self.bulk_path).lower() in str(dir).lower())
-                )
-            ]
-            if possible_defect_folders:  # update output path (otherwise will crash with informative error)
-                self.output_path = os.path.join(self.output_path, os.pardir)
-
-        if self.subfolder is None:  # determine subfolder to use
-            vasp_subfolders = [
-                subdir
-                for possible_defect_folder in possible_defect_folders
-                for subdir in os.listdir(os.path.join(self.output_path, possible_defect_folder))
-                if os.path.isdir(os.path.join(self.output_path, possible_defect_folder, subdir))
-                and "vasp_" in subdir
-            ]
-            vasp_type_count_dict = {  # Count Dik
-                i: len([subdir for subdir in vasp_subfolders if i in subdir])
-                for i in ["vasp_ncl", "vasp_std", "vasp_nkred_std", "vasp_gam"]
-            }
-            # take first entry with non-zero count, else use defect folder itself:
-            self.subfolder = next((subdir for subdir, count in vasp_type_count_dict.items() if count), ".")
-        self.subfolder = str(self.subfolder)
-
-        possible_bulk_folders = [
-            dir
-            for dir in possible_defect_folders
-            if "bulk" in str(dir).lower()
-            or (self.bulk_path is not None and str(dir).lower() == str(self.bulk_path).lower())
-        ]
-
-        if self.bulk_path is None:  # determine bulk_path to use
-            if len(possible_bulk_folders) == 1:
-                self.bulk_path = os.path.join(self.output_path, possible_bulk_folders[0])
-            elif len([dir for dir in possible_bulk_folders if str(dir).lower().endswith("_bulk")]) == 1:
-                self.bulk_path = os.path.join(
-                    self.output_path,
-                    next(iter(dir for dir in possible_bulk_folders if str(dir).lower().endswith("_bulk"))),
-                )
-            else:
-                raise ValueError(
-                    f"Could not automatically determine bulk supercell calculation folder in "
-                    f"{self.output_path}, found {len(possible_bulk_folders)} folders containing "
-                    f"`vasprun.xml(.gz)` files (in subfolders) and 'bulk' in the folder name. Please "
-                    f"specify `bulk_path` manually."
-                )
-        if not os.path.isdir(self.bulk_path):
-            if len(possible_bulk_folders) == 1:
-                self.bulk_path = os.path.join(self.output_path, possible_bulk_folders[0])
-            else:
-                raise FileNotFoundError(
-                    f"Could not find bulk supercell calculation folder at '{self.bulk_path}'!"
-                )
-
-        self.defect_folders = [
-            dir
-            for dir in possible_defect_folders
-            if dir not in possible_bulk_folders
-            and (
-                self.subfolder in os.listdir(os.path.join(self.output_path, dir)) or self.subfolder == "."
-            )
-        ]
-
-        # add subfolder to bulk_path if present with vasprun.xml(.gz), otherwise use bulk_path as is:
-        if os.path.isdir(os.path.join(self.bulk_path, self.subfolder)) and any(
-            "vasprun" in file and ".xml" in file
-            for file in os.listdir(os.path.join(self.bulk_path, self.subfolder))
-        ):
-            self.bulk_path = os.path.join(self.bulk_path, self.subfolder)
-        elif all("vasprun" not in file or ".xml" not in file for file in os.listdir(self.bulk_path)):
-            possible_bulk_subfolders = [
-                dir
-                for dir in os.listdir(self.bulk_path)
-                if os.path.isdir(os.path.join(self.bulk_path, dir))
-                and any(
-                    "vasprun" in file and ".xml" in file
-                    for file in os.listdir(os.path.join(self.bulk_path, dir))
-                )
-            ]
-            if len(possible_bulk_subfolders) == 1 and subfolder is None:
-                # if only one subfolder with a vasprun.xml file in it, and `subfolder` wasn't explicitly
-                # set by the user, then use this
-                self.bulk_path = os.path.join(self.bulk_path, possible_bulk_subfolders[0])
-            else:
-                raise FileNotFoundError(
-                    f"`vasprun.xml(.gz)` files (needed for defect parsing) not found in bulk folder at: "
-                    f"{self.bulk_path} or subfolder: {self.subfolder} -- please ensure `vasprun.xml(.gz)` "
-                    f"files are present and/or specify `bulk_path` manually."
-                )
-
-        # remove trailing '/.' from bulk_path if present:
-        self.bulk_path = self.bulk_path.rstrip("/.")
-        bulk_vr_path, multiple = _get_output_files_and_check_if_multiple("vasprun.xml", self.bulk_path)
-        if multiple:
-            _multiple_files_warning(
-                "vasprun.xml",
-                self.bulk_path,
-                bulk_vr_path,
-                dir_type="bulk",
-            )
-
+        pbar = tqdm(total=len(self.defect_folders), desc="Parsing bulk reference calculation")
+        # parse bulk calculation:
         self.bulk_vr, self.bulk_procar = _parse_vr_and_poss_procar(
-            bulk_vr_path,
-            parse_projected_eigen=self.parse_projected_eigen,
             output_path=self.bulk_path,
+            parse_projected_eigen=self.parse_projected_eigen,
             label="bulk",
             parse_procar=True,
         )
-        self.parse_projected_eigen = (
-            self.bulk_vr.projected_eigenvalues is not None or self.bulk_procar is not None
+        self.parse_projected_eigen = any(
+            i is not None for i in [self.bulk_vr.projected_eigenvalues, self.bulk_procar]
         )
 
         # try parsing the bulk oxidation states first, for later assigning defect "oxi_state"s (i.e.
         # fully ionised charge states):
+        pbar.set_description("Guessing oxidation states in bulk structure")
         self._bulk_oxi_states: Structure | Composition | dict | bool = False
-        if bulk_struct_w_oxi := guess_and_set_oxi_states_with_timeout(
-            self.bulk_vr.final_structure, break_early_if_expensive=True
-        ):
-            self.bulk_vr.final_structure = self._bulk_oxi_states = bulk_struct_w_oxi
+        with warnings.catch_warnings():  # ignore warnings if issues in guessing, this is not so important
+            warnings.filterwarnings("ignore", message="Oxidation states could not be guessed")
+            if bulk_struct_w_oxi := guess_and_set_oxi_states_with_timeout(
+                self.bulk_vr.final_structure, break_early_if_expensive=True
+            ):
+                self.bulk_vr.final_structure = self._bulk_oxi_states = bulk_struct_w_oxi
+
+        # load and parse bulk corrections data once for efficiency:
+        self.bulk_corrections_data = {}
+        if not skip_corrections:
+            bulk_corr_kwargs = {
+                "bulk_path": self.bulk_path,
+                "quiet": True,
+            }
+            with contextlib.suppress(Exception):
+                self.bulk_corrections_data["bulk_locpot_dict"] = _get_bulk_locpot_dict(**bulk_corr_kwargs)
+            with contextlib.suppress(Exception):
+                self.bulk_corrections_data["bulk_site_potentials"] = _get_bulk_site_potentials(
+                    total_energy=_get_total_energies(None, self.bulk_vr),
+                    **bulk_corr_kwargs,  # type: ignore
+                )
 
         self.defect_dict = {}
-        self.bulk_corrections_data = {  # so we only load and parse bulk data once
-            "bulk_locpot_dict": None,
-            "bulk_site_potentials": None,
-        }
-        parsed_defect_entries = []
-        parsing_warnings = []
+        parsed_defect_entries: list[DefectEntry] = []
+        parsing_warnings: list[str] = []
 
+        # set up multiprocessing:
         mp = get_mp_context()  # https://github.com/python/cpython/pull/100229
-        if self.processes is None:  # multiprocessing?
-            # only multiprocess as much as makes sense, if only a handful of defect folders:
+        if self.processes is None:  # only multiprocess as much as makes sense, if only few defect folders:
             self.processes = min(max(1, mp.cpu_count() - 1), len(self.defect_folders) - 1)
 
-        if self.processes <= 1:  # no multiprocessing
-            with tqdm(self.defect_folders, desc="Parsing defect calculations") as pbar:
-                for defect_folder in pbar:
-                    # set tqdm progress bar description to defect folder being parsed:
-                    pbar.set_description(f"Parsing {defect_folder}/{self.subfolder}".replace("/.", ""))
-                    parsed_defect_entry, warnings_string, _folder = self._parse_defect_and_handle_warnings(
-                        defect_folder
+        try:
+            if self.processes <= 1:  # no multiprocessing
+                for folder in self.defect_folders:
+                    parsed_defect_entry, processed_warnings_string = (
+                        self._parse_defect_and_handle_warnings(folder, pbar=pbar)
                     )
-                    parsing_warnings.append(
-                        self._parse_parsing_warnings(
-                            warnings_string, defect_folder, f"{defect_folder}/{self.subfolder}"
-                        )
-                    )
-                    if parsed_defect_entry is not None:
-                        parsed_defect_entries.append(parsed_defect_entry)
+                    parsing_warnings.append(processed_warnings_string)  # parsing warnings/errors
+                    parsed_defect_entries.append(parsed_defect_entry)  # None if failed parsing
 
-        else:  # otherwise multiprocessing:
-            # guess a charged defect in defect_folders, to try initially check if dielectric and
-            # corrections correctly set, before multiprocessing with the same settings for all folders:
-            charged_defect_folder = None
-            for possible_charged_defect_folder in self.defect_folders:
-                with contextlib.suppress(Exception):
-                    if abs(int(possible_charged_defect_folder[-1])) > 0:  # likely charged defect
-                        charged_defect_folder = possible_charged_defect_folder
-
-            pbar = tqdm(total=len(self.defect_folders))
-            try:
-                if charged_defect_folder is not None:
-                    # will throw warnings if dielectric is None / charge corrections not possible,
-                    # and set self.skip_corrections appropriately
-                    pbar.set_description(  # set this first as desc is only set after parsing in function
-                        f"Parsing {charged_defect_folder}/{self.subfolder}".replace("/.", "")
-                    )
-                    parsed_defect_entry, warnings_string, _folder = self._parse_defect_and_handle_warnings(
-                        charged_defect_folder
-                    )
-                    print("PDE: ", parsed_defect_entry)
-                    parsing_warnings.append(
-                        self._update_pbar_and_return_warnings_from_parsing(
-                            parsed_defect_entry,
-                            warnings_string,
-                            charged_defect_folder,
-                            pbar,
-                        )
-                    )
-                    if parsed_defect_entry is not None:
-                        parsed_defect_entries.append(parsed_defect_entry)
-
-                # also load the other bulk corrections data if possible:
-                for k, v in self.bulk_corrections_data.items():
-                    if v is None:
-                        with contextlib.suppress(Exception):
-                            if k == "bulk_locpot_dict":
-                                self.bulk_corrections_data[k] = _get_bulk_locpot_dict(
-                                    self.bulk_path, quiet=True
-                                )
-                            elif k == "bulk_site_potentials":
-                                self.bulk_corrections_data[k] = _get_bulk_site_potentials(
-                                    self.bulk_path,
-                                    quiet=True,
-                                    total_energy=[
-                                        self.bulk_vr.final_energy,
-                                        self.bulk_vr.ionic_steps[-1]["electronic_steps"][-1]["e_0_energy"],
-                                    ],
-                                )
-
-                folders_to_process = [
-                    folder for folder in self.defect_folders if folder != charged_defect_folder
-                ]
+            else:  # otherwise multiprocessing:
                 pbar.set_description("Setting up multiprocessing")
                 if self.processes > 1:
                     with pool_manager(self.processes) as pool:  # parsed_defect_entry, warnings
-                        results = pool.imap_unordered(
-                            self._parse_defect_and_handle_warnings, folders_to_process
+                        pbar.set_description(
+                            f"Parsing {self.defect_folders[0]}/{self.subfolder}".replace("/.", "")
                         )
-                        for result in results:  # result -> (defect_entry, warnings_string, folder)
-                            parsing_warnings.append(
-                                self._update_pbar_and_return_warnings_from_parsing(
-                                    defect_entry=result[0],
-                                    warnings_string=result[1],
-                                    defect_folder=result[2],
-                                    pbar=pbar,
+                        for parsed_defect_entry, processed_warnings_string in pool.imap_unordered(
+                            self._parse_defect_and_handle_warnings, self.defect_folders
+                        ):
+                            pbar.update()
+                            if parsed_defect_entry is not None:
+                                defect_folder = _get_defect_folder(parsed_defect_entry, self.subfolder)
+                                pbar.set_description(
+                                    f"Parsed {defect_folder}/{self.subfolder}".replace("/.", "")
                                 )
-                            )
-                            if result[0] is not None:
-                                parsed_defect_entries.append(result[0])
+                            parsing_warnings.append(processed_warnings_string)  # parsing warnings/errors
+                            parsed_defect_entries.append(parsed_defect_entry)  # None if failed parsing
 
-            except Exception as exc:
-                pbar.close()
-                raise exc
+        finally:
+            pbar.close()
 
-            finally:
-                pbar.close()
+        # checks and warnings:
+        _format_and_raise_parsing_warnings(  # format and raise any parsing warnings
+            parsing_warnings, bulk_path=self.bulk_path, subfolder=self.subfolder
+        )
 
-        if parsing_warnings := [
-            warning for warning in parsing_warnings if warning  # remove empty strings
-        ]:
-            split_parsing_warnings = [warning.split("\n\n") for warning in parsing_warnings]
-
-            def _mention_bulk_path_subfolder_for_correction_warnings(warning: str) -> str:
-                if "defect & bulk" in warning or "defect or bulk" in warning:
-                    # charge correction file warning, print subfolder and bulk_path:
-                    if self.subfolder == ".":
-                        warning += f"\n(using bulk path: {self.bulk_path} and without defect subfolders)"
-                    else:
-                        warning += (
-                            f"\n(using bulk path {self.bulk_path} and {self.subfolder} defect subfolders)"
-                        )
-
-                return warning
-
-            split_parsing_warnings = [
-                [_mention_bulk_path_subfolder_for_correction_warnings(warning) for warning in warning_list]
-                for warning_list in split_parsing_warnings
-            ]
-            flattened_warnings_list = [
-                warning for warning_list in split_parsing_warnings for warning in warning_list
-            ]
-            duplicate_warnings: dict[str, list[str]] = {
-                warning: []
-                for warning in set(flattened_warnings_list)
-                if flattened_warnings_list.count(warning) > 1 and "Parsing failed for " not in warning
-            }
-            new_parsing_warnings = []
-            parsing_errors_dict: dict[str, list[str]] = {
-                message.split("got error: ")[1]: []
-                for message in set(flattened_warnings_list)
-                if "Parsing failed for " in message
-            }
-            multiple_files_warning_dict: dict[str, list[tuple]] = {
-                "vasprun.xml": [],
-                "OUTCAR": [],
-                "LOCPOT": [],
-            }
-
-            for warnings_list in split_parsing_warnings:
-                failed_warnings = [
-                    warning_message
-                    for warning_message in warnings_list
-                    if "Parsing failed for " in warning_message
-                ]
-                if failed_warnings:
-                    defect_name = failed_warnings[0].split("Parsing failed for ")[1].split(", got ")[0]
-                    error = failed_warnings[0].split("got error: ")[1]
-                    parsing_errors_dict[error].append(defect_name)
-                elif "Warning(s) encountered" in warnings_list[0]:
-                    defect_name = warnings_list[0].split("when parsing ")[1].split(" at")[0]
-                else:
-                    defect_name = None
-
-                new_warnings_list = []
-                for warning in warnings_list:
-                    if warning.startswith("Multiple"):
-                        file_type = warning.split("`")[1]
-                        directory = warning.split("directory: ")[1].split(". Using")[0]
-                        chosen_file = warning.split("Using ")[1].split(" to")[0]
-                        multiple_files_warning_dict[file_type].append((directory, chosen_file))
-
-                    elif warning in duplicate_warnings:
-                        duplicate_warnings[warning].append(defect_name)
-
-                    else:
-                        new_warnings_list.append(warning)
-
-                if [  # if we still have other warnings, keep them for parsing_warnings list
-                    warning
-                    for warning in new_warnings_list
-                    if "Warning(s) encountered" not in warning and "Parsing failed for " not in warning
-                ]:
-                    new_parsing_warnings.append(
-                        "\n".join(
-                            [
-                                warning
-                                for warning in new_warnings_list
-                                if "Parsing failed for " not in warning
-                            ]
-                        )
-                    )
-
-            for error, defect_list in parsing_errors_dict.items():
-                if defect_list:
-                    if len(set(defect_list)) > 1:
-                        warnings.warn(
-                            f"Parsing failed for defects: {defect_list} with the same error:\n{error}"
-                        )
-                    else:
-                        warnings.warn(f"Parsing failed for defect {defect_list[0]} with error:\n{error}")
-
-            for file_type, directory_file_list in multiple_files_warning_dict.items():
-                if directory_file_list:
-                    joined_info_string = "\n".join(
-                        [f"{directory}: {file}" for directory, file in directory_file_list]
-                    )
-                    warnings.warn(
-                        f"Multiple `{file_type}` files found in certain defect directories:\n"
-                        f"(directory: chosen file for parsing):\n"
-                        f"{joined_info_string}\n"
-                        f"{file_type} files are used to "
-                        f"{_vasp_file_parsing_action_dict[file_type]}"
-                    )
-
-            parsing_warnings = new_parsing_warnings
-            if parsing_warnings:
-                warnings.warn("\n\n".join(parsing_warnings))
-
-            for warning, defect_name_list in duplicate_warnings.items():
-                # remove None and don't warn if later encountered parsing error (already warned)
-                defect_set = {defect_name for defect_name in defect_name_list if defect_name}
-                if defect_set:
-                    warnings.warn(f"Defects: {defect_set} each encountered the same warning:\n{warning}")
-
+        parsed_defect_entries = [
+            i for i in parsed_defect_entries if i is not None
+        ]  # remove None (failed parsing)
         if not parsed_defect_entries:
             subfolder_string = f" and `subfolder`: '{self.subfolder}'" if self.subfolder != "." else ""
             raise ValueError(
@@ -1390,260 +1130,25 @@ class DefectsParserVasp:
                 f"expected (see `DefectsParser` docstring)."
             )
 
-        parsed_defect_entries = sort_defect_entries(parsed_defect_entries)  # type: ignore
-
-        # check if there are duplicate entries in the parsed defect entries, warn and remove:
-        energy_entries_dict: dict[float, list[DefectEntry]] = {}  # {energy: [defect_entry]}
-        for defect_entry in parsed_defect_entries:  # find duplicates by comparing supercell energies
-            if defect_entry.sc_entry_energy in energy_entries_dict:
-                energy_entries_dict[defect_entry.sc_entry_energy].append(defect_entry)
-            else:
-                energy_entries_dict[defect_entry.sc_entry_energy] = [defect_entry]
-
-        for energy, entries_list in energy_entries_dict.items():
-            if len(entries_list) > 1:  # More than one entry with the same energy
-                # sort any duplicates by name length, name, folder length, folder (shorter preferred)
-                energy_entries_dict[energy] = sorted(
-                    entries_list,
-                    key=lambda x: (
-                        len(x.name),
-                        x.name,
-                        len(self._get_defect_folder(x)),
-                        self._get_defect_folder(x),
-                    ),
-                )
-
-        if any(len(entries_list) > 1 for entries_list in energy_entries_dict.values()):
-            duplicate_entry_names_folders_string = "\n".join(
-                "["
-                + ", ".join(f"{entry.name} ({self._get_defect_folder(entry)})" for entry in entries_list)
-                + "]"
-                for entries_list in energy_entries_dict.values()
-                if len(entries_list) > 1
-            )
-            warnings.warn(
-                f"The following parsed defect entries were found to be duplicates (exact same defect "
-                f"supercell energies). The first of each duplicate group shown will be kept and the "
-                f"other duplicate entries omitted:\n{duplicate_entry_names_folders_string}"
-            )
-        parsed_defect_entries = [next(iter(entries_list)) for entries_list in energy_entries_dict.values()]
-
-        # get any defect entries in parsed_defect_entries that share the same name (without charge):
-        # first get any entries with duplicate names:
-        entries_to_rename = [
-            defect_entry
-            for defect_entry in parsed_defect_entries
-            if len(
-                [
-                    defect_entry
-                    for other_defect_entry in parsed_defect_entries
-                    if defect_entry.name == other_defect_entry.name
-                ]
-            )
-            > 1
-        ]
-        # then get all entries with the same name(s), ignoring charge state (in case e.g. only duplicate
-        # for one charge state etc):
-        entries_to_rename = [
-            defect_entry
-            for defect_entry in parsed_defect_entries
-            if any(
-                defect_entry.name.rsplit("_", 1)[0] == other_defect_entry.name.rsplit("_", 1)[0]
-                for other_defect_entry in entries_to_rename
-            )
-        ]
-
-        self.defect_dict = {
-            defect_entry.name: defect_entry
-            for defect_entry in parsed_defect_entries
-            if defect_entry not in entries_to_rename
-        }
-
-        with contextlib.suppress(AttributeError, TypeError):  # sort by supercell frac cooords,
-            # to aid deterministic naming:
-            entries_to_rename.sort(
-                key=lambda x: _frac_coords_sort_func(_get_defect_supercell_frac_coords(x))
-            )
-
-        new_named_defect_entries_dict = name_defect_entries(entries_to_rename)
-        # set name attribute: (these are names without charges!)
-        for defect_name_wout_charge, defect_entry in new_named_defect_entries_dict.items():
-            defect_entry.name = (
-                f"{defect_name_wout_charge}_{'+' if defect_entry.charge_state > 0 else ''}"
-                f"{defect_entry.charge_state}"
-            )
-
-        if duplicate_names := [  # if any duplicate names, crash (and burn, b...)
-            defect_entry.name
-            for defect_entry in entries_to_rename
-            if defect_entry.name in self.defect_dict
-        ]:
-            raise ValueError(
-                f"Some defect entries have the same name, due to mixing of doped-named and unnamed "
-                f"defect folders. This would cause defect entries to be overwritten. Please check "
-                f"your defect folder names in `output_path`!\nDuplicate defect names:\n"
-                f"{duplicate_names}"
-            )
-
-        self.defect_dict.update(
-            {defect_entry.name: defect_entry for defect_entry in new_named_defect_entries_dict.values()}
+        # check if any charged defects present, no dielectric but skip_corrections not set to False:
+        charged_defects_present = any(
+            defect_entry.charge_state != 0 for defect_entry in parsed_defect_entries
         )
-        self.defect_dict = sort_defect_entries(self.defect_dict)  # type: ignore
-
-        FNV_correction_errors = []
-        eFNV_correction_errors = []
-        defect_thermo = self.get_defect_thermodynamics(check_compatibility=False, skip_dos_check=True)
-        for name, defect_entry in self.defect_dict.items():
-            # first check if it's a stable defect:
-            fermi_stability_window = defect_thermo._get_in_gap_fermi_level_stability_window(defect_entry)
-
-            if fermi_stability_window < 0 or (  # Note we avoid the prune_to_stable_entries() method here
-                defect_entry.is_shallow  # as this would require two ``DefectThermodynamics`` inits...
-                and fermi_stability_window
-                < kwargs.get(
-                    "shallow_charge_stability_tolerance",
-                    min(error_tolerance, defect_thermo.band_gap * 0.1 if defect_thermo.band_gap else 0.05),
-                )
-            ):
-                continue  # no charge correction warnings for unstable charge states
-
-            if (
-                defect_entry.corrections_metadata.get("freysoldt_charge_correction_error", 0)
-                > error_tolerance
-            ):
-                FNV_correction_errors.append(
-                    (name, defect_entry.corrections_metadata["freysoldt_charge_correction_error"])
-                )
-            if (
-                defect_entry.corrections_metadata.get("kumagai_charge_correction_error", 0)
-                > error_tolerance
-            ):
-                eFNV_correction_errors.append(
-                    (name, defect_entry.corrections_metadata["kumagai_charge_correction_error"])
-                )
-
-        def _call_multiple_corrections_tolerance_warning(correction_errors, type="FNV"):
-            long_name = "Freysoldt" if type == "FNV" else "Kumagai"
-            if error_tolerance >= 0.01:  # if greater than 10 meV, round energy values to meV:
-                error_tol_string = f"{error_tolerance:.3f}"
-                correction_errors_string = "\n".join(
-                    f"{name}: {error:.3f} eV" for name, error in correction_errors
-                )
-            else:  # else give in scientific notation:
-                error_tol_string = f"{error_tolerance:.2e}"
-                correction_errors_string = "\n".join(
-                    f"{name}: {error:.2e} eV" for name, error in correction_errors
-                )
-
+        if charged_defects_present and self.dielectric is None and not skip_corrections:
             warnings.warn(
-                f"Estimated error in the {long_name} ({type}) charge correction for certain "
-                f"defects is greater than the `error_tolerance` (= {error_tol_string} eV):"
-                f"\n{correction_errors_string}\n"
-                f"You may want to check the accuracy of the corrections by plotting the site "
-                f"potential differences (using `defect_entry.get_{long_name.lower()}_correction()`"
-                f" with `plot=True`). Large errors are often due to unstable or shallow defect "
-                f"charge states (which can't be accurately modelled with the supercell "
-                f"approach). If these errors are not acceptable, you may need to use a larger "
-                f"supercell for more accurate energies."
+                "The dielectric constant (`dielectric`) is needed to compute finite-size charge "
+                "corrections, but none was provided, so charge corrections have been skipped "
+                "(`skip_corrections = True`). Formation energies and transition levels of charged defects "
+                "will likely be very inaccurate without charge corrections!"
             )
 
-        if FNV_correction_errors:
-            _call_multiple_corrections_tolerance_warning(FNV_correction_errors, type="FNV")
-        if eFNV_correction_errors:
-            _call_multiple_corrections_tolerance_warning(eFNV_correction_errors, type="eFNV")
+        self.defect_dict = _name_parsed_defect_entries(parsed_defect_entries, subfolder=self.subfolder)
 
-        # check if same type of charge correction was used in each case or not:
-        if (
-            len(
-                {
-                    k
-                    for defect_entry in self.defect_dict.values()
-                    for k in defect_entry.corrections
-                    if k.endswith("_charge_correction")
-                }
-            )
-            > 1
-        ):
-            warnings.warn(
-                "Beware: The Freysoldt (FNV) charge correction scheme has been used for some defects, "
-                "while the Kumagai (eFNV) scheme has been used for others. For _isotropic_ materials, "
-                "this should be fine, and the results should be the same regardless (assuming a "
-                "relatively well-converged supercell size), while for _anisotropic_ materials this could "
-                "lead to some quantitative inaccuracies. You can use the "
-                "`DefectThermodynamics.get_formation_energies()` method to print out the calculated "
-                "charge corrections for all defects, and/or visualise the charge corrections using "
-                "`defect_entry.get_freysoldt_correction`/`get_kumagai_correction` with `plot=True` to "
-                "check."
-            )  # either way have the error analysis for the charge corrections so in theory should be grand
-        # note that we also check if multiple charge corrections have been applied to the same defect
-        # within the charge correction functions (with self._check_if_multiple_finite_size_corrections())
-
-        mismatching_INCAR_warnings = sorted(
-            [
-                (name, set(defect_entry.calculation_metadata.get("mismatching_INCAR_tags")))
-                for name, defect_entry in self.defect_dict.items()
-                if defect_entry.calculation_metadata.get("mismatching_INCAR_tags")
-            ],
-            key=lambda x: (len(x[1]), x[0]),
-            reverse=True,
-        )  # sort by number of mismatches, reversed
-        if mismatching_INCAR_warnings:
-            warnings.warn(
-                f"There are mismatching INCAR tags for (some of) your defect and bulk calculations which "
-                f"are likely to cause errors in the parsed results (energies). Found the following "
-                f"differences:\n"
-                f"(in the format: 'Defects: (INCAR tag, value in defect calculation, value in bulk "
-                f"calculation))':"
-                f"\n{_format_mismatching_incar_warning(mismatching_INCAR_warnings)}\n"
-                f"In general, the same INCAR settings should be used in all final calculations for these "
-                f"tags which can affect energies!"
-            )
-
-        mismatching_kpoints_warnings = sorted(
-            [
-                (name, defect_entry.calculation_metadata.get("mismatching_KPOINTS"))
-                for name, defect_entry in self.defect_dict.items()
-                if defect_entry.calculation_metadata.get("mismatching_KPOINTS")
-            ],
-            key=lambda x: (len(x[1]), x[0]),
-            reverse=True,
-        )
-        if mismatching_kpoints_warnings:
-            joined_info_string = "\n".join(
-                [f"{name}: {mismatching}" for name, mismatching in mismatching_kpoints_warnings]
-            )
-            warnings.warn(
-                f"There are mismatching KPOINTS for (some of) your defect and bulk calculations which "
-                f"are likely to cause errors in the parsed results (energies). Found the following "
-                f"differences:\n"
-                f"(in the format: (defect kpoints, bulk kpoints)):"
-                f"\n{joined_info_string}\n"
-                f"In general, the same KPOINTS settings should be used for all final calculations for "
-                f"accurate results!"
-            )
-
-        mismatching_potcars_warnings = sorted(
-            [
-                (name, defect_entry.calculation_metadata.get("mismatching_POTCAR_symbols"))
-                for name, defect_entry in self.defect_dict.items()
-                if defect_entry.calculation_metadata.get("mismatching_POTCAR_symbols")
-            ],
-            key=lambda x: (len(x[1]), x[0]),
-            reverse=True,
-        )  # sort by number of mismatches, reversed
-        if mismatching_potcars_warnings:
-            joined_info_string = "\n".join(
-                [f"{name}: {mismatching}" for name, mismatching in mismatching_potcars_warnings]
-            )
-            warnings.warn(
-                f"There are mismatching POTCAR symbols for (some of) your defect and bulk calculations "
-                f"which are likely to cause severe errors in the parsed results (energies). Found the "
-                f"following differences:\n"
-                f"(in the format: (defect POTCARs, bulk POTCARs)):"
-                f"\n{joined_info_string}\n"
-                f"In general, the same POTCAR settings should be used for all calculations for accurate "
-                f"results!"
-            )
+        # Parsed defect checks:
+        # handle (and warn) any charge correction errors or calculation parameter mismatches:
+        _handle_charge_correction_errors(self.defect_dict, self.error_tolerance, **kwargs)
+        _warn_calculation_mismatches(self.defect_dict)  # warn any mismatching defect/bulk calc parameters
+        _check_and_warn_dimer_bonds_spin_states(self.defect_dict, rtol=self.kwargs.get("rtol", 1.05))
 
         if self.json_filename is not False:  # save to json unless json_filename is False:
             if self.json_filename is None:
@@ -1652,61 +1157,71 @@ class DefectsParserVasp:
                 ).defect.structure.composition.get_reduced_formula_and_factor(iupac_ordering=True)[0]
                 self.json_filename = f"{formula}_defect_dict.json.gz"
 
-            dumpfn(self.defect_dict, os.path.join(self.output_path, self.json_filename))  # type: ignore
+            assert isinstance(self.json_filename, str)  # typing
+            dumpfn(self.defect_dict, os.path.join(self.output_path, self.json_filename))
 
-    def _parse_parsing_warnings(self, warnings_string, defect_folder, defect_path):
-        if warnings_string:
-            split_warnings = warnings_string.split("\n\n")
-            if "Parsing failed for " not in warnings_string or len(split_warnings) > 1:
-                location = f" at {defect_path}" if defect_path != "N/A" else ""  # let's ride the vibration
-                return (  # either only warnings (no exceptions), or warning(s) + exception
-                    f"Warning(s) encountered when parsing {defect_folder}{location}:\n\n{warnings_string}"
-                )
-            return warnings_string  # only exception, return as is
+    def _parse_single_defect(self, defect_folder: str) -> DefectEntry | None:
+        """
+        Parse a single defect calculation at
+        ``{self.output_path}/{defect_folder}/{self.subfolder}``, using
+        ``DefectParser.from_paths()``.
 
-        return ""
+        Args:
+            defect_folder (str):
+                The defect folder to parse in ``self.output_path`` (and using
+                ``self.subfolder``), with ``DefectParser.from_paths()``.
 
-    def _get_defect_folder(self, entry):
-        return (
-            entry.calculation_metadata["defect_path"]
-            .replace("/.", "")
-            .split("/")[-1 if self.subfolder == "." else -2]
-        )
+        Returns:
+            DefectEntry | None:
+                The parsed ``DefectEntry`` object, or ``None`` if parsing
+                failed.
+        """
+        try:
+            self.kwargs.update(self.bulk_corrections_data)  # update with bulk corrections data
+            assert isinstance(self.subfolder, str)  # typing, converted to str by this point
+            dp = DefectParser(self.code).from_paths(
+                defect_path=os.path.join(self.output_path, defect_folder, self.subfolder),
+                bulk_path=self.bulk_path,
+                bulk_vr=self.bulk_vr,
+                bulk_procar=self.bulk_procar,
+                dielectric=self.dielectric,
+                skip_corrections=self.skip_corrections,
+                error_tolerance=self.error_tolerance,
+                bulk_band_gap_vr=self.bulk_band_gap_vr,
+                oxi_state=self.kwargs.get("oxi_state") if self._bulk_oxi_states else "Undetermined",
+                parse_projected_eigen=self.parse_projected_eigen,
+                **self.kwargs,
+            )
 
-    def _update_pbar_and_return_warnings_from_parsing(
-        self,
-        defect_entry: DefectEntry,
-        warnings_string: str = "",
-        defect_folder: str | None = None,
-        pbar: tqdm = None,
-    ):
-        if pbar:
-            pbar.update()
+        except Exception as exc:
+            warnings.warn(
+                f"Parsing failed for "
+                f"{defect_folder if self.subfolder == '.' else f'{defect_folder}/{self.subfolder}'}, "
+                f"got error: {exc!r}"
+            )
+            return None
 
-        defect_path = "N/A"
-        if defect_entry is not None:
-            defect_folder = self._get_defect_folder(defect_entry)
-            defect_path = defect_entry.calculation_metadata.get("defect_path", "N/A")
-            if pbar:
-                pbar.set_description(f"Parsing {defect_folder}/{self.subfolder}".replace("/.", ""))
+        return dp.defect_entry
 
-        if warnings_string:
-            return self._parse_parsing_warnings(warnings_string, defect_folder, defect_path)
-
-        return warnings_string  # failed parsing warning if defect_entry is None
-
-    def _parse_defect_and_handle_warnings(self, defect_folder: str) -> tuple:
+    def _parse_defect_and_handle_warnings(self, defect_folder: str, pbar: tqdm | None = None) -> tuple:
         """
         Process defect and catch warnings along the way, so we can print which
         warnings came from which defect together at the end, in a summarised
         output.
 
         Args:
-            defect_folder (str): The defect folder to parse.
+            defect_folder (str):
+                The defect folder to parse in ``self.output_path`` (and using
+                ``self.subfolder``), with ``_parse_single_defect``.
+            pbar (tqdm):
+                ``tqdm`` progress bar to update with parsing progress.
 
         Returns:
-            tuple: (parsed_defect_entry, warnings_string, defect_folder)
+            tuple: (parsed_defect_entry, warnings_string)
         """
+        if pbar:  # set tqdm progress bar description to defect folder being parsed:
+            pbar.set_description(f"Parsing {defect_folder}/{self.subfolder}".replace("/.", ""))
+
         with warnings.catch_warnings(record=True) as captured_warnings:
             parsed_defect_entry = self._parse_single_defect(defect_folder)
 
@@ -1728,54 +1243,17 @@ class DefectsParserVasp:
             if not _check_ignored_message_in_warning(warning.message)
         )
 
-        return parsed_defect_entry, warnings_string, defect_folder
+        defect_path = (
+            parsed_defect_entry.calculation_metadata.get("defect_path", "N/A")
+            if parsed_defect_entry is not None
+            else f"{defect_folder}/{self.subfolder}"
+        )
+        processed_warnings_string = _process_parsing_warnings(warnings_string, defect_folder, defect_path)
 
-    def _parse_single_defect(self, defect_folder):
-        try:
-            self.kwargs.update(self.bulk_corrections_data)  # update with bulk corrections data
-            dp = DefectParser(self.code).from_paths(
-                defect_path=os.path.join(self.output_path, defect_folder, self.subfolder),
-                bulk_path=self.bulk_path,
-                bulk_vr=self.bulk_vr,
-                bulk_procar=self.bulk_procar,
-                dielectric=self.dielectric,
-                skip_corrections=self.skip_corrections,
-                error_tolerance=self.error_tolerance,
-                bulk_band_gap_vr=self.bulk_band_gap_vr,
-                oxi_state=self.kwargs.get("oxi_state") if self._bulk_oxi_states else "Undetermined",
-                parse_projected_eigen=self.parse_projected_eigen,
-                **self.kwargs,
-            )
+        if pbar:
+            pbar.update()
 
-            if dp.skip_corrections and dp.defect_entry.charge_state != 0 and self.dielectric is None:
-                self.skip_corrections = dp.skip_corrections  # set skip_corrections to True if
-                # dielectric is None and there are charged defects present (shows dielectric warning once)
-
-            if (
-                dp.defect_entry.calculation_metadata.get("bulk_locpot_dict") is not None
-                and self.bulk_corrections_data.get("bulk_locpot_dict") is None
-            ):
-                self.bulk_corrections_data["bulk_locpot_dict"] = dp.defect_entry.calculation_metadata[
-                    "bulk_locpot_dict"
-                ]
-
-            if (
-                dp.defect_entry.calculation_metadata.get("bulk_site_potentials") is not None
-                and self.bulk_corrections_data.get("bulk_site_potentials") is None
-            ):
-                self.bulk_corrections_data["bulk_site_potentials"] = (
-                    dp.defect_entry.calculation_metadata
-                )["bulk_site_potentials"]
-
-        except Exception as exc:
-            warnings.warn(
-                f"Parsing failed for "
-                f"{defect_folder if self.subfolder == '.' else f'{defect_folder}/{self.subfolder}'}, "
-                f"got error: {exc!r}"
-            )
-            return None
-
-        return dp.defect_entry
+        return parsed_defect_entry, processed_warnings_string
 
     def get_defect_thermodynamics(
         self,
@@ -1943,18 +1421,908 @@ class DefectsParserVasp:
         )
 
 
+def _get_calculation_folders_for_parsing(
+    output_path: PathLike = ".",
+    subfolder: PathLike | None = None,
+    bulk_path: PathLike | None = None,
+) -> tuple[list[str], str, str, str]:
+    """
+    Get calculation folders for parsing.
+
+    Args:
+        output_path (PathLike):
+            Path to the output directory containing the calculation folders to
+            be parsed. Default is current directory (".").
+        subfolder (PathLike | None):
+            Name of subfolder(s) within each calculation folder (in the
+            ``output_path`` directory) from which to parse. If not specified
+            (default), ``doped`` checks first for ``vasp_ncl``, ``vasp_std``,
+            ``vasp_gam`` subfolders with calculation outputs
+            (``vasprun.xml(.gz)`` files) and uses the highest level VASP type
+            (ncl > std > gam) found as ``subfolder``, otherwise uses the
+            defect calculation folder itself with no subfolder (set
+            ``subfolder = "."`` to enforce this).
+        bulk_path (PathLike | None):
+            Path to bulk reference calculation folder. If not specified,
+            searches for folder with "bulk" in the name in the ``output_path``
+            directory (matching the default ``doped`` name for the bulk
+            reference folder). Can be the full path, or the relative path from
+            the ``output_path`` directory.
+
+    Returns:
+        tuple[list[str], PathLike, PathLike, PathLike]:
+            List of calculation folders for parsing, output path, subfolder,
+            and bulk path (the last three of which are the input arguments
+            which may have been updated within this function).
+    """
+    out_root = Path(output_path).resolve()
+    user_set_subfolder = subfolder is not None
+
+    def _get_calc_files_df(root: Path) -> pd.DataFrame:
+        """
+        Get a DataFrame of calculation output files in folders under ``root``,
+        matching the ``_CALC_OUTPUT_MASK`` filter, recursively, ignoring hidden
+        files and folders.
+        """
+        files_df = _dataframe_of_files(root)  # dataframe of files in folders under ``root``
+        pattern = "|".join(map(re.escape, _CALC_OUTPUT_MASK))  # regex filter pattern for output files
+        return (
+            files_df[files_df["filename"].str.contains(pattern, regex=True, na=False)]
+            if not files_df.empty
+            else pd.DataFrame()
+        )
+
+    calc_files_df = _get_calc_files_df(out_root)  # DataFrame of calculation output files
+    if calc_files_df.empty:  # user may have specified defect sub-folder directly, so check one level up
+        parent_root = out_root.parent
+        calc_files_df = _get_calc_files_df(parent_root)
+        files_not_found_error = FileNotFoundError(
+            f"No calculation folders with any of {_CALC_OUTPUT_MASK} in filenames found under "
+            f"{out_root}."
+        )
+        if calc_files_df.empty:  # no calculation output files found
+            raise files_not_found_error
+
+        possible_defect_folders = [  # candidate defect folders
+            g
+            for g in calc_files_df["folder_in_root"].unique()
+            if out_root.name in g  # only the specific defect directory specified
+            or _BULK_FOLDER_PATTERN in g.lower()  # or a bulk directory, for later
+            or (bulk_path and str(bulk_path).lower() in g.lower())
+        ]
+        if not possible_defect_folders:
+            raise files_not_found_error
+        out_root = parent_root  # shift context to parent directory
+
+    else:
+        possible_defect_folders = calc_files_df["folder_in_root"].unique().tolist()
+
+    subfolder = (
+        _determine_subfolder(calc_files_df, possible_defect_folders) if subfolder is None else subfolder
+    )
+
+    possible_bulk_folders = [  # candidate bulk folders
+        g
+        for g in possible_defect_folders
+        if _BULK_FOLDER_PATTERN in str(g).lower()
+        or (bulk_path and str(g).lower() == str(bulk_path).lower())
+    ]
+    defect_folders = [
+        d  # update candidate defect calculation folders, based on bulk calculation folder(s) and subfolder
+        for d in possible_defect_folders
+        if d not in possible_bulk_folders and (subfolder == "." or (out_root / d / subfolder).is_dir())
+    ]
+
+    if bulk_path is not None and not _get_calc_files_df(Path(bulk_path)).empty:
+        bulk_path = Path(bulk_path).resolve()
+
+    else:
+        bulk_path = _resolve_bulk_path(out_root, possible_bulk_folders, bulk_path)  # resolve bulk path
+
+    bulk_path = _append_subfolder_if_needed(bulk_path, subfolder, user_set_subfolder)
+
+    return defect_folders, str(out_root), str(subfolder), str(bulk_path)
+
+
+def _dataframe_of_files(root: Path) -> pd.DataFrame:
+    """
+    Get a dataframe with one row per file under *root*.
+
+    Args:
+        root (Path):
+            Path to the root directory.
+    """
+    rows: list[dict[str, Any]] = []
+    for f in root.rglob("*"):  # recursively find all files under root, ignoring hidden folders/files
+        if f.is_file():
+            relative_to_root_parts = f.relative_to(root).parts
+            if (
+                any(part.startswith(".") for part in relative_to_root_parts)
+                or len(relative_to_root_parts) < 2
+            ):  # ignore hidden files and folders, and files in root directory itself
+                continue
+            rows.append(
+                {
+                    "filename": f.name,
+                    "full_path": f,
+                    "folder_path": f.parent,
+                    "folder_in_root": f.relative_to(root).parts[0],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _determine_subfolder(files_df: pd.DataFrame, defect_folders: list[str]) -> str:
+    """
+    Pick the highest-priority calculation subfolder name, or "." if none found.
+
+    Args:
+        files_df (pd.DataFrame):
+            DataFrame with one row per file in folders under ``out_root``.
+        defect_folders (list[str]):
+            List of defect calculation folders (in ``out_root``).
+
+    Returns:
+        str:
+            The highest-priority calculation subfolder name, or "." if none
+            found.
+    """
+    defect_folders_df = files_df[files_df["folder_in_root"].isin(defect_folders)]
+    for subfolder in _SUBFOLDER_PRIORITY:
+        if any(subfolder in p.name for p in defect_folders_df["folder_path"].unique()):
+            return subfolder
+    return "."
+
+
+def _resolve_bulk_path(
+    out_root: Path, possible_bulk_folders: list[str], bulk_path: PathLike | None
+) -> Path:
+    """
+    Return absolute Path to bulk folder (may contain subfolder later).
+
+    Args:
+        out_root (Path):
+            Path to the output directory.
+        possible_bulk_folders (list[str]):
+            List of possible bulk calculation folders (in ``out_root``).
+        bulk_path (str | None):
+            User-provided explicit path to the bulk calculation directory.
+    """
+    if bulk_path is None:
+        if len(possible_bulk_folders) == 1:
+            return out_root / possible_bulk_folders[0]  # only one possible bulk folder, so return it
+
+        suffix_bulk = [
+            d for d in possible_bulk_folders if str(d).lower().endswith(f"_{_BULK_FOLDER_PATTERN}")
+        ]
+        if len(suffix_bulk) == 1:
+            return out_root / next(iter(suffix_bulk))  # only one possible bulk folder, so return it
+
+        raise ValueError(
+            f"Could not determine bulk supercell calculation folder in {out_root}, found "
+            f"{len(possible_bulk_folders)} folders containing any of {_CALC_OUTPUT_MASK} in filenames (in "
+            f"subfolders) and '{_BULK_FOLDER_PATTERN}' in the folder name. Please specify `bulk_path` "
+            f"manually."
+        )
+
+    if bulk_path is not None:
+        bulk_path = Path(bulk_path)
+
+        if not bulk_path.is_dir():
+            bulk_path = out_root / bulk_path
+            if not bulk_path.is_dir():
+                raise FileNotFoundError(
+                    f"Could not find bulk supercell calculation folder at '{bulk_path}'!"
+                )
+
+        bulk_path = bulk_path.resolve()  # convert to absolute path
+
+    return bulk_path
+
+
+def _append_subfolder_if_needed(bulk_path: Path, subfolder: PathLike, user_set: bool) -> Path:
+    """
+    Ensure ``bulk_path`` actually contains calculation files; dive into
+    ``subfolder`` if needed.
+
+    Args:
+        bulk_path (Path):
+            Path to the bulk calculation directory.
+        subfolder (str):
+            Subfolder with calculation output files.
+        user_set (bool):
+            Whether the subfolder was explicitly set by the user.
+
+    Returns:
+        Path:
+            Path to the bulk calculation directory, with subfolder if needed.
+    """
+    if (bulk_path / subfolder).is_dir() and any(
+        k in f.name for k in _CALC_OUTPUT_MASK for f in (bulk_path / subfolder).iterdir()
+    ):  # subfolder contains calculation output files, so add to bulk path
+        return bulk_path / subfolder
+
+    if not any(k in f.name for k in _CALC_OUTPUT_MASK for f in bulk_path.iterdir()):  # no output files
+        possible_bulk_subfolders = [
+            p
+            for p in bulk_path.iterdir()
+            if p.is_dir() and any(k in f.name for k in _CALC_OUTPUT_MASK for f in p.iterdir())
+        ]
+        if len(possible_bulk_subfolders) == 1 and not user_set:
+            # if only one subfolder with calculation outputs, and `subfolder` not explicitly set, use this:
+            return possible_bulk_subfolders[0].resolve()
+
+        raise FileNotFoundError(
+            f"No files with any of {_CALC_OUTPUT_MASK} in names found under {bulk_path} (subfolder "
+            f"{subfolder}). Please ensure bulk supercell calculation files are present and/or specify "
+            f"`bulk_path` manually."
+        )
+    return bulk_path
+
+
+def _process_parsing_warnings(
+    warnings_string: str = "",
+    defect_folder: str = "",
+    defect_path: str = "N/A",
+) -> str:
+    """
+    Process any warnings from parsing.
+
+    Args:
+        warnings_string (str):
+            String containing warnings from parsing, to be processed.
+        defect_folder (str):
+            Name of the defect folder being parsed, for formatting the warning
+            message.
+        defect_path (str):
+            Path to the defect calculation directory, for formatting the
+            warning message. Default is "N/A".
+
+    Returns:
+        str:
+            Processed warnings string, formatted for clarity and readability.
+            If there are no warnings or exceptions, returns an empty string.
+    """
+    if warnings_string:
+        split_warnings = warnings_string.split("\n\n")
+        if "Parsing failed for " not in warnings_string or len(split_warnings) > 1:
+            location = f" at {defect_path}" if defect_path != "N/A" else ""  # let's ride the vibration
+            return (  # either only warnings (no exceptions), or warning(s) + exception
+                f"Warning(s) encountered when parsing {defect_folder}{location}:\n\n{warnings_string}"
+            )
+
+    return warnings_string  # if exception, return as is, or "" if no warnings
+
+
+def _format_and_raise_parsing_warnings(
+    parsing_warnings: list[str], bulk_path: str = "bulk", subfolder: str = "."
+) -> None:
+    """
+    Process and display parsing warnings in an organized manner, grouping
+    duplicate warnings/errors.
+
+    Args:
+        parsing_warnings (list[str]):
+            List of warning/error strings from defect calculation parsing.
+        bulk_path (str):
+            Path to the bulk calculation directory (just for formatted error /
+            warning messages). Default is "bulk".
+        subfolder (str):
+            Subfolder of the defect calculation directory (just for formatted
+            error / warning messages). Default is ".".
+    """
+    parsing_warnings = [warning for warning in parsing_warnings if warning]  # remove empty strings
+    if not parsing_warnings:
+        return
+
+    split_parsing_warnings = [warning.split("\n\n") for warning in parsing_warnings]
+
+    def _mention_bulk_path_subfolder_for_correction_warnings(warning: str) -> str:
+        if "defect & bulk" in warning or "defect or bulk" in warning:
+            # charge correction file warning, print subfolder and bulk_path:
+            if subfolder == ".":
+                warning += f"\n(using bulk path: {bulk_path} and without defect subfolders)"
+            else:
+                warning += f"\n(using bulk path {bulk_path} and {subfolder} defect subfolders)"
+
+        return warning
+
+    split_parsing_warnings = [
+        [_mention_bulk_path_subfolder_for_correction_warnings(warning) for warning in warning_list]
+        for warning_list in split_parsing_warnings
+    ]
+    flattened_warnings_list = [
+        warning for warning_list in split_parsing_warnings for warning in warning_list
+    ]
+    duplicate_warnings: dict[str, list[str]] = {
+        warning: []
+        for warning in set(flattened_warnings_list)
+        if flattened_warnings_list.count(warning) > 1 and "Parsing failed for " not in warning
+    }
+    new_parsing_warnings = []
+    parsing_errors_dict: dict[str, list[str]] = {
+        message.split("got error: ")[1]: []
+        for message in set(flattened_warnings_list)
+        if "Parsing failed for " in message
+    }
+    multiple_files_warning_dict: dict[str, list[tuple]] = {
+        "vasprun.xml": [],
+        "OUTCAR": [],
+        "LOCPOT": [],
+    }
+
+    for warnings_list in split_parsing_warnings:
+        failed_warnings = [
+            warning_message
+            for warning_message in warnings_list
+            if "Parsing failed for " in warning_message
+        ]
+        if failed_warnings:
+            defect_name = failed_warnings[0].split("Parsing failed for ")[1].split(", got ")[0]
+            error = failed_warnings[0].split("got error: ")[1]
+            parsing_errors_dict[error].append(defect_name)
+        elif "Warning(s) encountered" in warnings_list[0]:
+            defect_name = warnings_list[0].split("when parsing ")[1].split(" at")[0]
+        else:
+            defect_name = None
+
+        new_warnings_list = []
+        for warning in warnings_list:
+            if warning.startswith("Multiple"):
+                file_type = warning.split("`")[1]
+                directory = warning.split("directory: ")[1].split(". Using")[0]
+                chosen_file = warning.split("Using ")[1].split(" to")[0]
+                multiple_files_warning_dict[file_type].append((directory, chosen_file))
+
+            elif warning in duplicate_warnings:
+                duplicate_warnings[warning].append(defect_name or "N/A")
+
+            else:
+                new_warnings_list.append(warning)
+
+        if [  # if we still have other warnings, keep them for parsing_warnings list
+            warning
+            for warning in new_warnings_list
+            if "Warning(s) encountered" not in warning and "Parsing failed for " not in warning
+        ]:
+            new_parsing_warnings.append(
+                "\n".join(
+                    [warning for warning in new_warnings_list if "Parsing failed for " not in warning]
+                )
+            )
+
+    for error, defect_list in parsing_errors_dict.items():
+        if defect_list:
+            if len(set(defect_list)) > 1:
+                warnings.warn(f"Parsing failed for defects: {defect_list} with the same error:\n{error}")
+            else:
+                warnings.warn(f"Parsing failed for defect {defect_list[0]} with error:\n{error}")
+
+    for file_type, directory_file_list in multiple_files_warning_dict.items():
+        if directory_file_list:
+            joined_info_string = "\n".join(
+                [f"{directory}: {file}" for directory, file in directory_file_list]
+            )
+            warnings.warn(
+                f"Multiple `{file_type}` files found in certain defect directories:\n"
+                f"(directory: chosen file for parsing):\n"
+                f"{joined_info_string}\n"
+                f"{file_type} files are used to {_vasp_file_parsing_action_dict[file_type]}"
+            )
+
+    if new_parsing_warnings:
+        warnings.warn("\n\n".join(new_parsing_warnings))
+
+    for warning, defect_name_list in duplicate_warnings.items():
+        # remove None and don't warn if later encountered parsing error (already warned)
+        defect_set = {defect_name for defect_name in defect_name_list if defect_name}
+        if defect_set:
+            warnings.warn(f"Defects: {defect_set} each encountered the same warning:\n{warning}")
+
+
+def _get_defect_folder(entry: DefectEntry, subfolder: str = ".") -> str:
+    """
+    Get the defect folder name from which a ``DefectEntry`` object was parsed.
+
+    Args:
+        entry (DefectEntry):
+            The defect entry to get the folder name from.
+        subfolder (str):
+            The subfolder of the defect calculation directory.
+
+    Returns:
+        str:
+            The defect folder name.
+    """
+    return (
+        entry.calculation_metadata["defect_path"]
+        .replace("/.", "")
+        .split("/")[-1 if subfolder == "." else -2]
+    )
+
+
+def _get_total_energies(computed_entry=None, vr=None):
+    """
+    Get the total energies from the defect entry or vasprun.
+    """
+    energies = [
+        computed_entry.energy if computed_entry else None,
+        vr.ionic_steps[-1]["electronic_steps"][-1]["e_0_energy"] if vr else None,
+    ]
+    with contextlib.suppress(Exception):
+        energies.append(vr.final_energy if vr else None)
+    return [energy for energy in energies if energy is not None]
+
+
+def _name_parsed_defect_entries(
+    parsed_defect_entries: list[DefectEntry], subfolder: str = "."
+) -> dict[str, DefectEntry]:
+    """
+    Format parsed defect entries, including naming and sorting, handling any
+    duplicates and renaming appropriately.
+
+    Args:
+        parsed_defect_entries (list[DefectEntry]):
+            List of parsed defect entries to format.
+        subfolder (str):
+            Defect calculation subfolder name.
+
+    Returns:
+        dict[str, DefectEntry]:
+            Formatted dictionary of defect entries.
+    """
+    # sort input entries for deterministic naming:
+    parsed_defect_entries = sort_defect_entries(parsed_defect_entries)
+
+    # check if there are duplicate entries in the parsed defect entries, warn and remove:
+    energy_entries_dict: dict[float, list[DefectEntry]] = {}  # {energy: [defect_entry]}
+    for defect_entry in parsed_defect_entries:  # find duplicates by comparing supercell energies
+        if defect_entry.sc_entry_energy in energy_entries_dict:
+            energy_entries_dict[defect_entry.sc_entry_energy].append(defect_entry)
+        else:
+            energy_entries_dict[defect_entry.sc_entry_energy] = [defect_entry]
+
+    for energy, entries_list in energy_entries_dict.items():
+        if len(entries_list) > 1:  # more than one entry with the same energy
+            # sort any duplicates by name length, name, folder length, folder (shorter preferred)
+            energy_entries_dict[energy] = sorted(
+                entries_list,
+                key=lambda x: (
+                    len(x.name),
+                    x.name,
+                    len(_get_defect_folder(x, subfolder)),
+                    _get_defect_folder(x, subfolder),
+                ),
+            )
+
+    if any(len(entries_list) > 1 for entries_list in energy_entries_dict.values()):
+        duplicate_entry_names_folders_string = "\n".join(
+            "["
+            + ", ".join(f"{entry.name} ({_get_defect_folder(entry, subfolder)})" for entry in entries_list)
+            + "]"
+            for entries_list in energy_entries_dict.values()
+            if len(entries_list) > 1
+        )
+        warnings.warn(
+            f"The following parsed defect entries were found to be duplicates (exact same defect "
+            f"supercell energies). The first of each duplicate group shown will be kept and the "
+            f"other duplicate entries omitted:\n{duplicate_entry_names_folders_string}"
+        )
+    parsed_defect_entries = [next(iter(entries_list)) for entries_list in energy_entries_dict.values()]
+
+    # get any defect entries in parsed_defect_entries that share the same name (without charge):
+    # first get any entries with duplicate names:
+    entries_to_rename = [
+        defect_entry
+        for defect_entry in parsed_defect_entries
+        if len(
+            [
+                defect_entry
+                for other_defect_entry in parsed_defect_entries
+                if defect_entry.name == other_defect_entry.name
+            ]
+        )
+        > 1
+    ]
+    # then get all entries with the same name(s), ignoring charge state (in case e.g. only duplicate
+    # for one charge state etc):
+    entries_to_rename = [
+        defect_entry
+        for defect_entry in parsed_defect_entries
+        if any(
+            defect_entry.name.rsplit("_", 1)[0] == other_defect_entry.name.rsplit("_", 1)[0]
+            for other_defect_entry in entries_to_rename
+        )
+    ]
+
+    # Create initial defect_dict with non-duplicate entries
+    defect_dict = {
+        defect_entry.name: defect_entry
+        for defect_entry in parsed_defect_entries
+        if defect_entry not in entries_to_rename
+    }
+
+    with contextlib.suppress(AttributeError, TypeError):  # sort by supercell frac cooords,
+        # to aid deterministic naming:
+        entries_to_rename.sort(key=lambda x: _frac_coords_sort_func(_get_defect_supercell_frac_coords(x)))
+
+    new_named_defect_entries_dict = name_defect_entries(entries_to_rename)
+    # set name attribute: (these are names without charges!)
+    for defect_name_wout_charge, defect_entry in new_named_defect_entries_dict.items():
+        defect_entry.name = (
+            f"{defect_name_wout_charge}_{'+' if defect_entry.charge_state > 0 else ''}"
+            f"{defect_entry.charge_state}"
+        )
+
+    if duplicate_names := [  # if any duplicate names, crash (and burn, b...)
+        defect_entry.name for defect_entry in entries_to_rename if defect_entry.name in defect_dict
+    ]:
+        raise ValueError(
+            f"Some defect entries have the same name, due to mixing of doped-named and unnamed "
+            f"defect folders. This would cause defect entries to be overwritten. Please check "
+            f"your defect folder names in `output_path`!\nDuplicate defect names:\n"
+            f"{duplicate_names}"
+        )
+
+    defect_dict.update(
+        {defect_entry.name: defect_entry for defect_entry in new_named_defect_entries_dict.values()}
+    )
+
+    return sort_defect_entries(defect_dict)
+
+
+def _warn_calculation_mismatches(defect_dict: dict[str, DefectEntry]) -> None:
+    """
+    Generic handler for mismatching calculation parameters, stored in
+    ``DefectEntry.calculation_metadata``.
+    """
+    # key = mismatch key, value = dict with transform of DefectEntry.calculation_metadata[mismatch key],
+    # and message format function:
+    mismatch_dict: dict[str, dict] = {
+        "mismatching_INCAR_tags": {
+            "transform": set,
+            "message": lambda lst: (
+                "'Defects: (INCAR tag, value in defect calculation, value in bulk calculation))':\n"
+                f"{_format_mismatching_incar_warning(lst)}\n"
+                "In general, the same INCAR settings should be used in all final calculations for these "
+                "tags which can affect energies!"
+            ),
+        },
+        "mismatching_KPOINTS": {
+            "transform": lambda defect_and_bulk_kpoints_lists: [
+                [[float(kpt) for kpt in kpoints] for kpoints in kpoints_list]
+                for kpoints_list in defect_and_bulk_kpoints_lists
+            ],
+            "message": lambda lst: (
+                "(defect kpoints, bulk kpoints)):\n" + "\n".join(f"{n}: {m}" for n, m in lst) + "\n"
+                "In general, the same KPOINTS settings should be used for all final calculations for "
+                "accurate results!"
+            ),
+        },
+        "mismatching_POTCAR_symbols": {
+            "transform": lambda v: v,
+            "message": lambda lst: (
+                "(defect POTCARs, bulk POTCARs)):\n" + "\n".join(f"{n}: {m}" for n, m in lst) + "\n"
+                "In general, the same POTCAR settings should be used for all calculations for accurate "
+                "results!"
+            ),
+        },
+    }
+
+    for mismatch_key, mismatch_spec in mismatch_dict.items():
+        mismatch_object = mismatch_key.split("_")[1]  # "mismatching_INCAR_tags" -> "INCAR" (for message)
+        if mismatch_object == "INCAR":
+            mismatch_object = "INCAR tags"
+        elif mismatch_object == "POTCAR":
+            mismatch_object = "POTCAR symbols"  # otherwise "KPOINTS" stays as is
+
+        mismatches = [
+            (name, mismatch_spec["transform"](entry.calculation_metadata[mismatch_key]))
+            for name, entry in defect_dict.items()
+            if entry.calculation_metadata.get(mismatch_key, False)
+        ]
+        if not mismatches:
+            continue
+
+        # sort by number of items then by name, descending, then warn
+        mismatches.sort(key=lambda x: (len(x[1]), x[0]), reverse=True)
+
+        warnings.warn(
+            f"There are mismatching {mismatch_object} for (some of) your defect and bulk calculations "
+            f"which are likely to cause errors in the parsed results (energies). Found the following "
+            f"differences:\n(in the format: {mismatch_spec['message'](mismatches)})"
+        )
+
+
+def _handle_charge_correction_errors(
+    defect_dict: dict[str, DefectEntry], error_tolerance: float, **kwargs
+) -> None:
+    """
+    Check for charge correction errors and warn if they exceed the error
+    tolerance.
+
+    Args:
+        defect_dict (dict[str, DefectEntry]):
+            The dictionary of defect entries to check and warn if necessary.
+        error_tolerance (float):
+            The error tolerance threshold for charge corrections (in eV),
+            used to decide whether to trigger a warning.
+        **kwargs:
+            Additional keyword arguments, such as
+            ``shallow_charge_stability_tolerance``.
+    """
+    FNV_correction_errors: list[tuple[str, float]] = []
+    eFNV_correction_errors: list[tuple[str, float]] = []
+    defect_thermo = DefectThermodynamics(
+        list(defect_dict.values()), check_compatibility=False, skip_dos_check=True
+    )
+
+    for name, defect_entry in defect_dict.items():
+        # first check if it's a stable defect:
+        fermi_stability_window = defect_thermo._get_in_gap_fermi_level_stability_window(defect_entry)
+
+        if fermi_stability_window < 0 or (  # Note we avoid the prune_to_stable_entries() method here
+            defect_entry.is_shallow  # as this would require two ``DefectThermodynamics`` inits...
+            and fermi_stability_window
+            < kwargs.get(
+                "shallow_charge_stability_tolerance",
+                min(error_tolerance, defect_thermo.band_gap * 0.1 if defect_thermo.band_gap else 0.05),
+            )
+        ):
+            continue  # no charge correction warnings for unstable charge states
+
+        for correction_type, correction_error_list in [
+            ("freysoldt", FNV_correction_errors),
+            ("kumagai", eFNV_correction_errors),
+        ]:
+            if (
+                defect_entry.corrections_metadata.get(f"{correction_type}_charge_correction_error", 0)
+                > error_tolerance
+            ):
+                correction_error_list.append(
+                    (
+                        name,
+                        defect_entry.corrections_metadata[f"{correction_type}_charge_correction_error"],
+                    )
+                )
+
+    def _call_multiple_corrections_tolerance_warning(correction_errors, type="FNV"):
+        long_name = "Freysoldt" if type == "FNV" else "Kumagai"
+        if error_tolerance >= 0.01:  # if greater than 10 meV, round energy values to meV:
+            error_tol_string = f"{error_tolerance:.3f}"
+            correction_errors_string = "\n".join(
+                f"{name}: {error:.3f} eV" for name, error in correction_errors
+            )
+        else:  # else give in scientific notation:
+            error_tol_string = f"{error_tolerance:.2e}"
+            correction_errors_string = "\n".join(
+                f"{name}: {error:.2e} eV" for name, error in correction_errors
+            )
+
+        warnings.warn(
+            f"Estimated error in the {long_name} ({type}) charge correction for certain defects is "
+            f"greater than the `error_tolerance` (= {error_tol_string} eV):"
+            f"\n{correction_errors_string}\n"
+            f"You may want to check the accuracy of the corrections by plotting the site potential "
+            f"differences (using `defect_entry.get_{long_name.lower()}_correction()` with "
+            f"`plot=True`). Large errors are often due to unstable or shallow defect charge states "
+            f"(which can't be accurately modelled with the supercell approach). If these errors are "
+            f"not acceptable, you may need to use a larger supercell for more accurate energies."
+        )
+
+    for correction_errors, type in [
+        (FNV_correction_errors, "FNV"),
+        (eFNV_correction_errors, "eFNV"),
+    ]:
+        if correction_errors:
+            _call_multiple_corrections_tolerance_warning(correction_errors, type=type)
+
+    # check if same type of charge correction was used in each case or not:
+    if (
+        len(
+            {
+                k
+                for defect_entry in defect_dict.values()
+                for k in defect_entry.corrections
+                if k.endswith("_charge_correction")
+            }
+        )
+        > 1
+    ):
+        warnings.warn(
+            "Beware: The Freysoldt (FNV) charge correction scheme has been used for some defects, "
+            "while the Kumagai (eFNV) scheme has been used for others. For _isotropic_ materials, "
+            "this should be fine, and the results should be the same regardless (assuming a "
+            "relatively well-converged supercell size), while for _anisotropic_ materials this could "
+            "lead to some quantitative inaccuracies. You can use the "
+            "`DefectThermodynamics.get_formation_energies()` method to print out the calculated "
+            "charge corrections for all defects, and/or visualise the charge corrections using "
+            "`defect_entry.get_freysoldt_correction`/`get_kumagai_correction` with `plot=True` to "
+            "check."
+        )
+    # note that we also check if multiple charge corrections have been applied to the same defect
+    # within the charge correction functions (with _check_if_multiple_finite_size_corrections())
+
+
+def _check_and_warn_dimer_bonds_spin_states(
+    defect_dict: dict[str, DefectEntry], rtol: float = 1.05
+) -> None:
+    """
+    Check for dimer bonds in the parsed defect entries, and warn if they are
+    present and NUPDOWN not set to [0, 1] for any matching defect entry.
+
+    If there are between 1-3 dimer bonds, and NUPDOWN is not set to [0, 1] for
+    any matching defect entry, then warn that the defect may adopt a
+    multiplet spin state, and suggest setting NUPDOWN to 2/3 (or higher) for
+    this defect.
+
+    Args:
+        defect_dict (dict[str, DefectEntry]):
+            The dictionary of defect entries to check and warn if necessary.
+        rtol (float):
+            The relative tolerance to use for dimer bond detection.
+    """
+    defect_dimer_dict = {}
+    for name, defect_entry in defect_dict.items():
+        dimer_bonds_dict = get_dimer_bonds(defect_entry.defect_supercell, rtol=rtol)
+        num_dimer_bonds = sum(len(dimer_subdict) for dimer_subdict in dimer_bonds_dict.values())
+        if (
+            num_dimer_bonds > 0
+            and num_dimer_bonds < 4
+            and not any(  # check if NUPDOWN set to != [0, 1] in any matching defect & charge state
+                entry.calculation_metadata.get("run_metadata", {}).get("INCAR", {}).get("NUPDOWN", 0)
+                not in [0, 1]
+                for entry in defect_dict.values()
+                if entry.defect.name == defect_entry.defect.name
+                and entry.charge_state == defect_entry.charge_state
+            )
+        ):
+            defect_dimer_dict[name] = dimer_bonds_dict
+
+    if defect_dimer_dict:
+        dimer_bonds_str = "\n".join(str(subdict) for subdict in defect_dimer_dict.values())
+        warnings.warn(
+            f"Defects {', '.join(defect_dimer_dict.keys())} have been detected to have dimer bonds:\n"
+            f"{dimer_bonds_str}\n"
+            "which often adopt multiplet spin states (e.g. triplet O2, Si dimers etc, see "
+            "https://doped.readthedocs.io/en/latest/Tips.html#magnetization). "
+            "You may want to test setting `NUPDOWN` to 2 / 3 (for even / odd charge states) or higher "
+            "for this defect. You can control this warning with the ``rtol`` kwarg."
+        )
+
+
+def _parse_charge_state(
+    defect_vr: Vasprun,
+    possible_defect_name: str,
+    expected_charge_state: int | None = None,
+) -> int:
+    """
+    Determine the defect charge state from the ``Vasprun`` object, folder name,
+    and/or ``expected_charge_state``.
+    """
+    parsed_charge_state: int | None = total_charge_from_vasprun(defect_vr)
+
+    if expected_charge_state is None:  # expected charge state not provided
+        if parsed_charge_state is None:  # charge-state determination failed
+            charge_error = RuntimeError(
+                "System charge cannot be automatically determined from the calculation outputs. "
+                "This is typically due to POTCARs not being setup with pymatgen (see "
+                "https://doped.readthedocs.io/en/latest/Installation.html#setup-potcars-and-materials-"
+                "project-api). Please specify charge state manually using the `charge_state` "
+                "argument with ``DefectParser.from_paths()``, or set up POTCARs with pymatgen."
+            )
+            # try to determine from folder name -- must have "-" or "+" at end of name for this
+            charge_state_suffix = possible_defect_name.rsplit("_", 1)[-1]
+            if charge_state_suffix[0] not in ["-", "+"]:
+                raise ValueError(
+                    f"Could not guess charge state from folder name ({possible_defect_name}), must "
+                    f"end in '_+X' or '_-X' where +/-X is the charge state."
+                ) from charge_error
+
+            parsed_charge_state = int(charge_state_suffix)
+            if abs(parsed_charge_state) >= 9:
+                raise ValueError(
+                    f"Guessed charge state from folder name was {parsed_charge_state:+} which is "
+                    f"almost certainly unphysical"
+                ) from charge_error
+
+        if parsed_charge_state is not None and abs(parsed_charge_state) >= 10:  # extreme charge predicted
+            raise RuntimeError(
+                f"Auto-determined system charge q={int(parsed_charge_state):+} is unreasonably large. "
+                f"Please specify system charge manually using the `charge` argument."
+            )
+
+        return parsed_charge_state
+
+    # otherwise charge state provided:
+    if (  # check match
+        parsed_charge_state is not None
+        and int(expected_charge_state) != int(parsed_charge_state)
+        and abs(parsed_charge_state) < 8
+    ):
+        warnings.warn(
+            f"Auto-determined system charge q={int(parsed_charge_state):+} does not match specified "
+            f"charge q={int(expected_charge_state):+}. Will continue with specified charge_state, "
+            f"but beware!"
+        )
+
+    return expected_charge_state  # if charge state provided, we defer to this regardless
+
+
+def _parse_symmetry_and_degeneracy_metadata(defect_entry: DefectEntry, **kwargs):
+    """
+    Determine the unrelaxed ('bulk') and relaxed defect point symmetries for
+    the input ``DefectEntry``, whether there is any periodicity-breaking in the
+    supercell, and the corresponding orientational degeneracy factor.
+
+    Results are stored in the ``calculation_metadata`` and
+    ``degeneracy_factors`` property dicts of the ``DefectEntry``.
+    """
+    point_symm_and_periodicity_breaking = point_symmetry_from_defect_entry(
+        defect_entry,
+        relaxed=True,
+        verbose=kwargs.get("verbose", False),
+        return_periodicity_breaking=True,
+        **{
+            k: v
+            for k, v in kwargs.items()
+            if k in ["symprec", "dist_tol_factor", "fixed_symprec_and_dist_tol_factor"]
+        },
+    )
+    assert isinstance(point_symm_and_periodicity_breaking, tuple)  # typing (tuple returned)
+    relaxed_point_group, periodicity_breaking = point_symm_and_periodicity_breaking
+    bulk_site_point_group = point_symmetry_from_defect_entry(
+        defect_entry,
+        relaxed=False,
+        **{
+            k.replace("bulk_", ""): v
+            for k, v in kwargs.items()
+            if k in ["bulk_symprec", "dist_tol_factor", "fixed_symprec_and_dist_tol_factor", "verbose"]
+        },
+    )  # same symprec used w/interstitial multiplicity for consistency
+    assert isinstance(bulk_site_point_group, str)  # typing (str returned)
+    with contextlib.suppress(ValueError):
+        defect_entry.degeneracy_factors["orientational degeneracy"] = get_orientational_degeneracy(
+            relaxed_point_group=relaxed_point_group,
+            bulk_site_point_group=bulk_site_point_group,
+            **{
+                k: v
+                for k, v in kwargs.items()
+                if k
+                in [
+                    "symprec",
+                    "bulk_symprec",
+                    "dist_tol_factor",
+                    "fixed_symprec_and_dist_tol_factor",
+                    "verbose",
+                ]
+            },
+        )
+    defect_entry.calculation_metadata["relaxed point symmetry"] = relaxed_point_group
+    defect_entry.calculation_metadata["bulk site symmetry"] = bulk_site_point_group
+    defect_entry.calculation_metadata["periodicity_breaking_supercell"] = periodicity_breaking
+
+
 def _parse_vr_and_poss_procar(
-    vr_path: PathLike,
+    output_path: PathLike,
     parse_projected_eigen: bool | None = None,
-    output_path: PathLike | None = None,
     label: str = "bulk",
     parse_procar: bool = True,
 ):
+    """
+    Parse the ``vasprun.xml(.gz)`` file at ``output_path``, and possibly a
+    ``PROCAR`` file if both ``parse_procar`` and ``parse_projected_eigen`` are
+    ``True`` and  projected eigenvalues cannot be parsed from the
+    ``vasprun.xml(.gz)`` file.
+    """
     procar = None
-
     failed_eig_parsing_warning_message = (
         f"Could not parse eigenvalue data from vasprun.xml.gz files in {label} folder at {output_path}"
     )
+
+    vr_path, multiple = _get_output_files_and_check_if_multiple("vasprun.xml", output_path)
+    if multiple:
+        _multiple_files_warning("vasprun.xml", output_path, vr_path, dir_type=label)
 
     try:
         vr = get_vasprun(
@@ -1968,6 +2336,8 @@ def _parse_vr_and_poss_procar(
 
         if parse_procar:
             procar_path, multiple = _get_output_files_and_check_if_multiple("PROCAR", output_path)
+            if multiple:
+                _multiple_files_warning("PROCAR", output_path, procar_path, dir_type=label)
             if "PROCAR" in procar_path and parse_projected_eigen is not False:
                 try:
                     procar = get_procar(procar_path)
@@ -1993,7 +2363,6 @@ class DefectParserVasp:
         defect_entry: DefectEntry,
         defect_vr: Vasprun | None = None,
         bulk_vr: Vasprun | None = None,
-        skip_corrections: bool = False,
         error_tolerance: float = 0.05,
         parse_projected_eigen: bool | None = None,
         **kwargs,
@@ -2016,10 +2385,6 @@ class DefectParserVasp:
             bulk_vr (Vasprun):
                 ``pymatgen`` ``Vasprun`` object for the reference bulk
                 supercell calculation.
-            skip_corrections (bool):
-                Whether to skip calculation and application of finite-size
-                charge corrections to the defect energy (not recommended in
-                most cases). Default is ``False``.
             error_tolerance (float):
                 If the estimated error in the defect charge correction, based
                 on the variance of the potential in the sampling region is
@@ -2061,11 +2426,10 @@ class DefectParserVasp:
         self.defect_entry: DefectEntry = defect_entry
         self.defect_vr = defect_vr
         self.bulk_vr = bulk_vr
-        self.skip_corrections = skip_corrections
         self.error_tolerance = error_tolerance
         self.kwargs = kwargs or {}
         self.parse_projected_eigen = parse_projected_eigen
-      
+
     @classmethod
     def from_paths(
         cls,
@@ -2198,121 +2562,52 @@ class DefectParserVasp:
             "defect_path": os.path.abspath(defect_path),
         }
 
-        if bulk_path is not None and bulk_vr is None:
-            # add bulk simple properties
-            bulk_vr_path, multiple = _get_output_files_and_check_if_multiple("vasprun.xml", bulk_path)
-            if multiple:
-                _multiple_files_warning(
-                    "vasprun.xml",
-                    bulk_path,
-                    bulk_vr_path,
-                    dir_type="bulk",
-                )
-            bulk_vr, reparsed_bulk_procar = _parse_vr_and_poss_procar(
-                bulk_vr_path,
-                parse_projected_eigen,
-                bulk_path,
+        # parse bulk reference cell output files:
+        if bulk_path is not None and bulk_vr is None:  # add bulk simple properties
+            parsed_bulk_vasp_objs = _parse_vr_and_poss_procar(  # (bulk_vr, bulk_procar) if parse_procar
+                output_path=bulk_path,  # else just bulk_vr
+                parse_projected_eigen=parse_projected_eigen,
                 label="bulk",
                 parse_procar=bulk_procar is None,
             )
-            if bulk_procar is None and reparsed_bulk_procar is not None:
-                bulk_procar = reparsed_bulk_procar
+            bulk_vr, bulk_procar = (
+                parsed_bulk_vasp_objs if len(parsed_bulk_vasp_objs) == 2 else (parsed_bulk_vasp_objs, None)
+            )
             parse_projected_eigen = bulk_vr.projected_eigenvalues is not None or bulk_procar is not None
 
         elif bulk_vr is None:
             raise ValueError("Either `bulk_path` or `bulk_vr` must be provided!")
         bulk_supercell = bulk_vr.final_structure.copy()
 
-        # add defect simple properties
-        (
-            defect_vr_path,
-            multiple,
-        ) = _get_output_files_and_check_if_multiple("vasprun.xml", defect_path)
-        if multiple:
-            _multiple_files_warning(
-                "vasprun.xml",
-                defect_path,
-                defect_vr_path,
-                dir_type="defect",
-            )
-
+        # parse defect supercell output files:
         defect_vr, defect_procar = _parse_vr_and_poss_procar(
-            defect_vr_path, parse_projected_eigen, defect_path, label="defect"
+            defect_path, parse_projected_eigen=parse_projected_eigen, label="defect", parse_procar=True
         )
         parse_projected_eigen = defect_procar is not None or defect_vr.projected_eigenvalues is not None
 
+        # parse (possible) defect name and charge state
         possible_defect_name = os.path.basename(
             defect_path.rstrip("/.").rstrip("/")  # remove any trailing slashes to ensure correct name
         )  # set equal to folder name
         if "vasp" in possible_defect_name:  # get parent directory name:
             possible_defect_name = os.path.basename(os.path.dirname(defect_path))
 
-        try:
-            parsed_charge_state: int = total_charge_from_vasprun(defect_vr, charge_state)
-        except RuntimeError as orig_exc:  # auto charge guessing failed and charge_state not provided,
-            # try to determine from folder name -- must have "-" or "+" at end of name for this
-            try:
-                charge_state_suffix = possible_defect_name.rsplit("_", 1)[-1]
-                if charge_state_suffix[0] not in ["-", "+"]:
-                    raise ValueError(
-                        f"Could not guess charge state from folder name ({possible_defect_name}), must "
-                        f"end in '_+X' or '_-X' where +/-X is the charge state."
-                    )
+        charge_state = _parse_charge_state(defect_vr, possible_defect_name, charge_state)
 
-                parsed_charge_state = int(charge_state_suffix)
-                if abs(parsed_charge_state) >= 7:
-                    raise ValueError(
-                        f"Guessed charge state from folder name was {parsed_charge_state:+} which is "
-                        f"almost certainly unphysical"
-                    )
-            except Exception as next_exc:
-                raise orig_exc from next_exc
-
-        # parse spin degeneracy now, before proj eigenvalues/magnetization are cut (for SOC/NCL calcs):
-        degeneracy_factors = {
-            "spin degeneracy": spin_degeneracy_from_vasprun(defect_vr, charge_state=parsed_charge_state)
-            / spin_degeneracy_from_vasprun(bulk_vr, charge_state=0)
-        }
-
-        if dielectric is None and not skip_corrections and parsed_charge_state != 0:
-            warnings.warn(
-                "The dielectric constant (`dielectric`) is needed to compute finite-size charge "
-                "corrections, but none was provided, so charge corrections will be skipped "
-                "(`skip_corrections = True`). Formation energies and transition levels of charged "
-                "defects will likely be very inaccurate without charge corrections!"
-            )
-            skip_corrections = True
-
-        if dielectric is not None:
-            dielectric = _convert_dielectric_to_tensor(dielectric)
-            calculation_metadata["dielectric"] = dielectric
-
-        # Add defect structure to calculation_metadata, so it can be pulled later on (e.g. for eFNV)
-        defect_structure = defect_vr.final_structure.copy()
-        calculation_metadata["defect_structure"] = defect_structure
-
-        # check if the bulk and defect supercells are the same size:
-        if not np.isclose(defect_structure.volume, bulk_supercell.volume, rtol=1e-2):
-            warnings.warn(
-                f"The defect and bulk supercells are not the same size, having volumes of "
-                f"{defect_structure.volume:.1f} and {bulk_supercell.volume:.1f} Å^3 respectively. This "
-                f"may cause errors in parsing and/or output energies. In most cases (unless looking at "
-                f"extremely high doping concentrations) the same fixed supercell (ISIF = 2) should be "
-                f"used for both the defect and bulk calculations! (i.e. assuming the dilute limit)"
-            )
-
+        # parse structural info and Defect object:
+        defect_supercell = defect_vr.final_structure.copy()
         (
             defect,
             defect_site,
             defect_structure_metadata,
         ) = defect_and_info_from_structures(
             bulk_supercell,
-            defect_structure.copy(),
+            defect_supercell,
             **{
                 k.replace("bulk_", ""): v
                 for k, v in kwargs.items()
                 if k
-                in [
+                in [  # allowed kwargs for Defect initialisation
                     "oxi_state",
                     "multiplicity",
                     "symprec",
@@ -2336,10 +2631,11 @@ class DefectParserVasp:
         for computed_entry in [sc_entry, bulk_entry]:
             computed_entry.parameters = dict(sorted(computed_entry.parameters.items()))
 
+        # generate DefectEntry object:
         defect_entry = DefectEntry(
             # pmg attributes:
             defect=defect,  # this corresponds to _unrelaxed_ defect
-            charge_state=parsed_charge_state,
+            charge_state=charge_state,
             sc_entry=sc_entry,
             sc_defect_frac_coords=defect_site.frac_coords,  # _relaxed_ defect site
             bulk_entry=bulk_entry,
@@ -2349,68 +2645,21 @@ class DefectParserVasp:
             defect_supercell=defect_vr.final_structure,
             bulk_supercell=bulk_vr.final_structure,
             calculation_metadata=calculation_metadata,
-            degeneracy_factors=degeneracy_factors,
-        )
-        # get orientational degeneracy
-        point_symm_and_periodicity_breaking = point_symmetry_from_defect_entry(
-            defect_entry,
-            relaxed=True,
-            verbose=kwargs.get("verbose", False),
-            return_periodicity_breaking=True,
-            **{
-                k: v
-                for k, v in kwargs.items()
-                if k in ["symprec", "dist_tol_factor", "fixed_symprec_and_dist_tol_factor"]
-            },
-        )
-        assert isinstance(point_symm_and_periodicity_breaking, tuple)  # typing (tuple returned)
-        relaxed_point_group, periodicity_breaking = point_symm_and_periodicity_breaking
-        bulk_site_point_group = point_symmetry_from_defect_entry(
-            defect_entry,
-            relaxed=False,
-            **{
-                k.replace("bulk_", ""): v
-                for k, v in kwargs.items()
-                if k in ["bulk_symprec", "dist_tol_factor", "fixed_symprec_and_dist_tol_factor", "verbose"]
-            },
-        )  # same symprec used w/interstitial multiplicity for consistency
-        assert isinstance(bulk_site_point_group, str)  # typing (str returned)
-        with contextlib.suppress(ValueError):
-            defect_entry.degeneracy_factors["orientational degeneracy"] = get_orientational_degeneracy(
-                relaxed_point_group=relaxed_point_group,
-                bulk_site_point_group=bulk_site_point_group,
-                **{
-                    k: v
-                    for k, v in kwargs.items()
-                    if k
-                    in [
-                        "symprec",
-                        "bulk_symprec",
-                        "dist_tol_factor",
-                        "fixed_symprec_and_dist_tol_factor",
-                        "verbose",
-                    ]
-                },
-            )
-        defect_entry.calculation_metadata["relaxed point symmetry"] = relaxed_point_group
-        defect_entry.calculation_metadata["bulk site symmetry"] = bulk_site_point_group
-        defect_entry.calculation_metadata["periodicity_breaking_supercell"] = periodicity_breaking
-
-        check_and_set_defect_entry_name(defect_entry, possible_defect_name)
-
-        dp = cls(
-            defect_entry,
-            defect_vr=defect_vr,
-            bulk_vr=bulk_vr,
-            skip_corrections=skip_corrections,
-            error_tolerance=error_tolerance,
-            parse_projected_eigen=parse_projected_eigen,
-            **kwargs,
         )
 
+        # determine symmetries and degeneracy factors
+        # parse spin degeneracy now, before proj eigenvalues/magnetization are cut (for SOC/NCL calcs):
+        defect_entry.degeneracy_factors = {
+            "spin degeneracy": spin_degeneracy_from_vasprun(defect_vr, charge_state=charge_state)
+            / spin_degeneracy_from_vasprun(bulk_vr, charge_state=0)
+        }
+        _parse_symmetry_and_degeneracy_metadata(defect_entry, **kwargs)  # get orientational degeneracy
+        check_and_set_defect_entry_name(defect_entry, possible_defect_name)  # needs symmetry information
+
+        # parse eigenvalue data and then remove unnecessary large data arrays:
         if parse_projected_eigen is not False:
             try:
-                dp.defect_entry._load_and_parse_eigenvalue_data(
+                defect_entry._load_and_parse_eigenvalue_data(
                     bulk_vr=bulk_vr,
                     bulk_procar=bulk_procar,
                     defect_vr=defect_vr,
@@ -2422,57 +2671,46 @@ class DefectParserVasp:
 
                 # these are removed in _load_and_parse_eigenvalue_data, but in case it fails:
                 defect_vr.projected_eigenvalues = None  # no longer needed, delete to reduce memory demand
-                defect_vr.projected_magnetisation = (
+                defect_vr.projected_magnetization = (
                     None  # no longer needed, delete to reduce memory demand
                 )
                 defect_vr.eigenvalues = None  # no longer needed, delete to reduce memory demand
 
+        dp = cls(
+            defect_entry,
+            defect_vr=defect_vr,
+            bulk_vr=bulk_vr,
+            error_tolerance=error_tolerance,
+            parse_projected_eigen=parse_projected_eigen,
+            **kwargs,
+        )
+
         dp.load_and_check_calculation_metadata()  # Load standard defect metadata
         dp.load_bulk_gap_data(bulk_band_gap_vr=bulk_band_gap_vr)  # Load band gap data
 
+        # check if charge corrections are possible, and apply if so (and ``skip_corrections = False``):
+        if dielectric is not None:
+            dp.defect_entry.calculation_metadata["dielectric"] = _convert_dielectric_to_tensor(dielectric)
+
+        elif not skip_corrections and charge_state != 0:
+            warnings.warn(
+                "The dielectric constant (`dielectric`) is needed to compute finite-size charge "
+                "corrections, but none was provided, so charge corrections will be skipped "
+                "(`skip_corrections = True`). Formation energies and transition levels of charged "
+                "defects will likely be very inaccurate without charge corrections!"
+            )
+            skip_corrections = True
+
         if not skip_corrections and defect_entry.charge_state != 0:
             # no finite-size charge corrections by default for neutral defects
-            skip_corrections = dp._check_and_load_appropriate_charge_correction()
+            skip_corrections = dp._check_and_load_appropriate_charge_correction_data()
 
         if not skip_corrections and defect_entry.charge_state != 0:
-            try:
-                dp.apply_corrections()
-            except Exception as exc:
-                warnings.warn(
-                    f"Got this error message when attempting to apply finite-size charge corrections:"
-                    f"\n{exc}\n"
-                    f"-> Charge corrections will not be applied for this defect."
-                )
-
-            # check that charge corrections are not negative
-            summed_corrections = sum(
-                val
-                for key, val in dp.defect_entry.corrections.items()
-                if any(i in key.lower() for i in ["freysoldt", "kumagai", "fnv", "charge"])
-            )
-            if summed_corrections < -0.08:
-                # usually unphysical for _isotropic_ dielectrics (suggests over-delocalised charge,
-                # affecting the potential alignment)
-                # how anisotropic is the dielectric?
-                how_aniso = np.diag(
-                    (dielectric - np.mean(np.diag(dielectric))) / np.mean(np.diag(dielectric))
-                )
-                if np.allclose(how_aniso, 0, atol=0.05):
-                    warnings.warn(
-                        f"The calculated finite-size charge corrections for defect at {defect_path} and "
-                        f"bulk at {bulk_path} sum to a _negative_ value of {summed_corrections:.3f}. For "
-                        f"relatively isotropic dielectrics (as is the case here) this is usually "
-                        f"unphyical, and can indicate 'false charge state' behaviour (with the supercell "
-                        f"charge occupying the band edge states and not localised at the defect), "
-                        f"affecting the potential alignment, or some error/mismatch in the defect and "
-                        f"bulk calculations. If this defect species is not stable in the formation "
-                        f"energy diagram then this warning can usually be ignored, but if it is, "
-                        f"you should double-check your calculations and parsed results!"
-                    )
+            dp.apply_corrections()
 
         return dp
 
-    def _check_and_load_appropriate_charge_correction(self):
+    def _check_and_load_appropriate_charge_correction_data(self):
         skip_corrections = False
         dielectric = self.defect_entry.calculation_metadata["dielectric"]
         bulk_path = self.defect_entry.calculation_metadata["bulk_path"]
@@ -2672,19 +2910,11 @@ class DefectParserVasp:
             return None
 
         bulk_site_potentials = bulk_site_potentials or self.kwargs.get("bulk_site_potentials", None)
-        if bulk_site_potentials is None:
-            total_energies = [
-                self.defect_entry.bulk_entry.energy if self.defect_entry.bulk_entry else None,
-                (
-                    self.bulk_vr.ionic_steps[-1]["electronic_steps"][-1]["e_0_energy"]
-                    if self.bulk_vr
-                    else None
-                ),
-            ]
 
+        if bulk_site_potentials is None:
             bulk_site_potentials = _get_bulk_site_potentials(
                 self.defect_entry.calculation_metadata["bulk_path"],
-                total_energy=[energy for energy in total_energies if energy is not None],
+                total_energy=_get_total_energies(self.defect_entry.bulk_entry, self.bulk_vr),
             )
 
         defect_outcar_path, multiple = _get_output_files_and_check_if_multiple(
@@ -2697,18 +2927,10 @@ class DefectParserVasp:
                 defect_outcar_path,
                 dir_type="defect",
             )
-        total_energies = [
-            self.defect_entry.sc_entry.energy,
-            (
-                self.defect_vr.ionic_steps[-1]["electronic_steps"][-1]["e_0_energy"]
-                if self.defect_vr
-                else None
-            ),
-        ]
         defect_site_potentials = get_core_potentials_from_outcar(
             defect_outcar_path,
             dir_type="defect",
-            total_energy=[energy for energy in total_energies if energy is not None],
+            total_energy=_get_total_energies(self.defect_entry.sc_entry, self.defect_vr),
         )
 
         self.defect_entry.calculation_metadata.update(
@@ -2726,44 +2948,22 @@ class DefectParserVasp:
         and check if the defect and bulk supercell calculations settings are
         compatible.
         """
-        if not self.bulk_vr:
-            bulk_vr_path, multiple = _get_output_files_and_check_if_multiple(
-                "vasprun.xml", self.defect_entry.calculation_metadata["bulk_path"]
-            )
-            if multiple:
-                _multiple_files_warning(
-                    "vasprun.xml",
-                    self.defect_entry.calculation_metadata["bulk_path"],
-                    bulk_vr_path,
-                    dir_type="bulk",
+        for attr in ["bulk_vr", "defect_vr"]:
+            if not getattr(self, attr, None):
+                label = attr.split("_")[0]  # "bulk" or "defect"
+                setattr(
+                    self,
+                    attr,
+                    _parse_vr_and_poss_procar(
+                        output_path=self.defect_entry.calculation_metadata[f"{label}_path"],
+                        parse_projected_eigen=False,  # not needed for DefectEntry metadata
+                        label=label,  # "bulk" or "defect"
+                        parse_procar=False,
+                    ),
                 )
-            self.bulk_vr = _parse_vr_and_poss_procar(
-                bulk_vr_path,
-                parse_projected_eigen=False,  # not needed for DefectEntry metadata
-                label="bulk",
-                parse_procar=False,
-            )
-
-        if not self.defect_vr:
-            defect_vr_path, multiple = _get_output_files_and_check_if_multiple(
-                "vasprun.xml", self.defect_entry.calculation_metadata["defect_path"]
-            )
-            if multiple:
-                _multiple_files_warning(
-                    "vasprun.xml",
-                    self.defect_entry.calculation_metadata["defect_path"],
-                    defect_vr_path,
-                    dir_type="defect",
-                )
-            self.defect_vr = _parse_vr_and_poss_procar(
-                defect_vr_path,
-                parse_projected_eigen=False,  # not needed for DefectEntry metadata
-                label="defect",
-                parse_procar=False,
-            )
 
         def _get_vr_dict_without_proj_eigenvalues(vr):
-            attributes_to_cut = ["projected_eigenvalues", "projected_magnetisation"]
+            attributes_to_cut = ["projected_eigenvalues", "projected_magnetization"]
             orig_values = {}
             for attribute in attributes_to_cut:
                 orig_values[attribute] = getattr(vr, attribute)
@@ -3050,7 +3250,7 @@ class DefectParserEspresso:
         skip_corrections: bool = False,
         error_tolerance: float = 0.05,
         parse_projected_eigen: bool | None = None,
-        default_filename: str = "espresso.xml",
+        filename: str = "espresso.xml",
         **kwargs,
     ):
         """
@@ -3120,7 +3320,7 @@ class DefectParserEspresso:
         self.error_tolerance = error_tolerance
         self.kwargs = kwargs or {}
         self.parse_projected_eigen = parse_projected_eigen
-        self.default_filename = default_filename
+        self.filename = filename
 
     @classmethod
     def from_paths(
@@ -3135,7 +3335,7 @@ class DefectParserEspresso:
         error_tolerance: float = 0.05,
         bulk_band_gap_vr: PathLike | Vasprun | None = None,
         parse_projected_eigen: bool | None = None,
-        default_filename = 'espresso.xml',
+        filename = 'espresso.xml',
         occu_tol: float = 1e-8,
         pp_folder: PathLike = None,
         **kwargs,
@@ -3228,7 +3428,7 @@ class DefectParserEspresso:
                 Default is ``None``, which will attempt to load this data but
                 with no warning if it fails (otherwise if ``True`` a warning
                 will be printed).
-            occu_tol: 
+            occu_tol:
                 Occupancy tolerance. Passed to ensuring bandgap edges. (Shift to kwargs??)
             **kwargs:
                 Keyword arguments to pass to ``DefectParser()`` methods
@@ -3252,9 +3452,9 @@ class DefectParserEspresso:
             ``DefectParser`` object.
         """
 
-        def _get_bulk_supercell(bulk_path, bulk_vr, default_filename, parse_projected_eigen, bulk_procar):
+        def _get_bulk_supercell(bulk_path, bulk_vr, filename, parse_projected_eigen, bulk_procar):
             if bulk_path is not None and bulk_vr is None:
-                bulk_vr_path, multiple = _get_output_files_warn_if_multiple(default_filename, bulk_path, dir_type="bulk")
+                bulk_vr_path, multiple = _get_output_files_warn_if_multiple(filename, bulk_path, dir_type="bulk")
 
                 bulk_vr, reparsed_bulk_procar = RunParser('espresso')._parse_run_and_poss_projwfc(
                     bulk_vr_path,
@@ -3274,15 +3474,19 @@ class DefectParserEspresso:
 
             bulk_supercell = bulk_vr.final_structure.copy()
             return bulk_vr, bulk_supercell
-
-        def _get_defect_vr_procar(default_filename, defect_path, parse_projected_eigen):
-            defect_vr_path, multiple = _get_output_files_warn_if_multiple(default_filename, defect_path, dir_type="defect")
+        def _get_defect_vr_procar(filename, defect_path, parse_projected_eigen):
+            defect_vr_path, multiple = _get_output_files_warn_if_multiple(filename, defect_path, dir_type="defect")
 
             defect_vr, defect_procar = RunParser('espresso')._parse_run_and_poss_projwfc(
                 defect_vr_path, parse_projected_eigen, defect_path, label="defect"
             )
             defect_vr = RunParser('espresso').ensure_band_edges(defect_vr, occu_tol, backend = 'pymatgen')         ### bandgap for bulk_vr
+
             return defect_vr, defect_procar
+
+
+        defect_vr, defect_procar = _get_defect_vr_procar(default_filename, defect_path, parse_projected_eigen)
+        parse_projected_eigen = defect_procar is not None or defect_vr.projected_eigenvalues is not None
 
         def _parse_charge_state(defect_path, defect_vr, pp_folder ):
             """
@@ -3295,7 +3499,7 @@ class DefectParserEspresso:
                 possible_defect_name = os.path.basename(os.path.dirname(defect_path))
 
             try:
-                parsed_charge_state: int = total_charge_from_vasprun(defect_vr, charge_state, 
+                parsed_charge_state: int = total_charge_from_vasprun(defect_vr, charge_state,
                                                                     code = 'espresso',
                                                                     pp_folder = pp_folder)
 
@@ -3319,22 +3523,20 @@ class DefectParserEspresso:
                     raise orig_exc from next_exc
 
             return possible_defect_name, parsed_charge_state
-        
+
         _ignore_pmg_warnings()  # ignore unnecessary pymatgen warnings
         calculation_metadata = {
             "bulk_path": os.path.abspath(bulk_path) if bulk_path else "bulk Vasprun supplied",
             "defect_path": os.path.abspath(defect_path),
         }
 
-        bulk_vr, bulk_supercell = _get_bulk_supercell(bulk_path, 
-                                            bulk_vr, 
-                                            default_filename, 
-                                            parse_projected_eigen, 
+        bulk_vr, bulk_supercell = _get_bulk_supercell(bulk_path,
+                                            bulk_vr,
+                                            filename,
+                                            parse_projected_eigen,
                                             bulk_procar)
-       
-        defect_vr, defect_procar = _get_defect_vr_procar(default_filename, defect_path, parse_projected_eigen)
+        defect_vr, defect_procar = _get_defect_vr_procar(filename, defect_path, parse_projected_eigen)
         parse_projected_eigen = defect_procar is not None or defect_vr.projected_eigenvalues is not None
-
         possible_defect_name, parsed_charge_state = _parse_charge_state(defect_path, defect_vr, pp_folder)
 
         # parse spin degeneracy now, before proj eigenvalues/magnetization are cut (for SOC/NCL calcs):
@@ -3402,7 +3604,7 @@ class DefectParserEspresso:
         # tracking for SK, allow it fam)
         sc_entry = defect_vr.get_computed_entry(entry_id = "")
         #sc_entry = RunParser('espresso').standardized_computed_entry(computed_entry = sc_entry)
-        
+
         bulk_entry = bulk_vr.get_computed_entry(entry_id = "")
         #bulk_entry = RunParser('espresso').standardized_computed_entry(computed_entry = bulk_entry)
 
@@ -3475,7 +3677,7 @@ class DefectParserEspresso:
 
 
             return relaxed_point_group, periodicity_breaking, bulk_site_point_group
-        
+
         relaxed_point_group, periodicity_breaking, bulk_site_point_group = orientational_degeneracy_wrapper(defect_entry, **kwargs)
         
         defect_entry.calculation_metadata["relaxed point symmetry"] = relaxed_point_group
@@ -3520,7 +3722,7 @@ class DefectParserEspresso:
                     defect_vr.eigenvalues = None  # no longer needed, delete to reduce memory demand
 
             return dp, defect_vr
-        
+
         dp, defect_vr = to_project_or_not_to_project(dp, defect_vr)
 
         dp.load_and_check_calculation_metadata()  # Load standard defect metadata
@@ -3572,7 +3774,7 @@ class DefectParserEspresso:
                             f"you should double-check your calculations and parsed results!"
                         )
             return dp
-        
+
         dp = to_correct_or_not_to_correct(dp, defect_entry, skip_corrections)
 
         return dp
@@ -3599,16 +3801,14 @@ class DefectParserEspresso:
             # exception?
                 # try to load FNV data()
                 # exception? sorry couldn't apply any correction. Let's just skip_corrections.
-        print("READING EFNV FOR", self.defect_entry.name)
 
         if _file_in_folder(defect_path, "cube") and _file_in_folder(bulk_path, "cube"):
-            try: 
+            try:
                 #load efnv data
                 self.load_eFNV_data()
 
                 pass
             except Exception as kumagai_exc:
-                print("\tEXCEPTION RAISED FOR", self.defect_entry.name)
                 try:
                     #load fnv
                     self.load_FNV_data()
@@ -3619,7 +3819,7 @@ class DefectParserEspresso:
                     skip_corrections = True
 
                 pass
-                
+
 
         # regardless, try parsing OUTCAR files first (quickest, more robust for cases where defect
         # charge is localised somewhat off the (auto-determined) defect site (e.g. split-interstitials
@@ -3801,10 +4001,9 @@ class DefectParserEspresso:
             return None
 
         bulk_site_potentials = bulk_site_potentials or self.kwargs.get("bulk_site_potentials", None)
-        # print("BULK_SITE_POTENTIALS: ", bulk_site_potentials)
         bulk_site_potentials_dict = {}
         if bulk_site_potentials is None:
-            
+
             bulk_path = self.defect_entry.calculation_metadata["bulk_path"]
             bulk_cube_path, _ = _get_output_files_warn_if_multiple("cube", bulk_path)
             bulk_site_potentials_dict = RunParser(self.code)._get_core_site_potentials(cube_file = bulk_cube_path)
@@ -3865,7 +4064,6 @@ class DefectParserEspresso:
         #     total_energy=[energy for energy in total_energies if energy is not None],
         # )
 
-        # print("\t", bulk_site_potentials_dict['site_potentials'])
 
         self.defect_entry.calculation_metadata.update(
             {
@@ -3873,7 +4071,6 @@ class DefectParserEspresso:
                 "defect_site_potentials": defect_site_potentials_dict['site_potentials'],
             }
         )
-        print("\tINSIDE LOAD EFNV DATA6 - MULTIPLY BY -1???")
         bulk_site_potentials = -np.array(bulk_site_potentials)
         return bulk_site_potentials
 
@@ -3894,7 +4091,6 @@ class DefectParserEspresso:
                     bulk_vr_path,
                     dir_type="bulk",
                 )
-            print("LOAD _ AND _ CHECK")
             self.bulk_vr = _parse_vr_and_poss_projwfc(
                 bulk_vr_path,
                 parse_projected_eigen=False,  # not needed for DefectEntry metadata
@@ -3943,7 +4139,7 @@ class DefectParserEspresso:
             }
 
             return vr_dict_wout_proj
-        
+
         def pseudopot_to_dict(filenames):
             """
             Hack for pymatgen.io.espresso because the pymatgen.io.vasp creates a list of dictionaries.
@@ -3953,7 +4149,7 @@ class DefectParserEspresso:
             else:
                 return filenames
 
-            return 
+            return
 
         self.bulk_vr.potcar_spec = pseudopot_to_dict(self.bulk_vr.potcar_spec)
         self.defect_vr.potcar_spec = pseudopot_to_dict(self.defect_vr.potcar_spec)
@@ -3999,6 +4195,21 @@ class DefectParserEspresso:
             kpoint_mismatches if not (isinstance(kpoint_mismatches, bool)) else False
         )
         self.defect_entry.calculation_metadata.update({"run_metadata": run_metadata.copy()})
+
+        # check if the bulk and defect supercells are the same size:
+        if not np.isclose(
+            self.defect_entry.sc_entry.structure.volume,
+            self.defect_entry.bulk_entry.structure.volume,
+            rtol=1e-2,
+        ):
+            warnings.warn(
+                f"The defect and bulk supercells are not the same size, having volumes of "
+                f"{self.defect_entry.sc_entry.structure.volume:.1f} and"
+                f" {self.defect_entry.bulk_entry.structure.volume:.1f} Å^3 respectively. This may cause "
+                f"errors in parsing and/or output energies. In most cases (unless looking at extremely "
+                f"high doping concentrations) the same fixed supercell (ISIF = 2) should be used for "
+                f"both the defect and bulk calculations! (i.e. assuming the dilute limit)"
+            )
 
     def load_bulk_gap_data(
         self,
@@ -4056,17 +4267,8 @@ class DefectParserEspresso:
                 Materials API key to access database.
         """
         if not self.bulk_vr:
-            bulk_vr_path, multiple = _get_output_files_and_check_if_multiple(
-                self.default_filename, self.defect_entry.calculation_metadata["bulk_path"]
-            )
-            if multiple:
-                warnings.warn(
-                    f"Multiple `vasprun.xml` files found in bulk directory: "
-                    f"{self.defect_entry.calculation_metadata['bulk_path']}. Using "
-                    f"{os.path.basename(bulk_vr_path)} to {_vasp_file_parsing_action_dict['vasprun.xml']}."
-                )
-            self.bulk_vr = RunParser('espresso')._parse_vr_and_poss_projwfc(
-                bulk_vr_path,
+            self.bulk_vr = _parse_vr_and_poss_procar(
+                output_path=self.defect_entry.calculation_metadata["bulk_path"],
                 parse_projected_eigen=self.parse_projected_eigen,
                 label="bulk",
                 parse_procar=False,
@@ -4168,8 +4370,18 @@ class DefectParserEspresso:
     def apply_corrections(self):
         """
         Get and apply defect corrections, and warn if likely to be
-        inappropriate.
+        inappropriate (based on error tolerances).
         """
+        try:
+            self._apply_corrections()
+        except Exception as exc:
+            warnings.warn(
+                f"Got this error message when attempting to apply finite-size charge corrections:"
+                f"\n{exc}\n"
+                f"-> Charge corrections will not be applied for this defect."
+            )
+
+    def _apply_corrections(self):
         if not self.defect_entry.charge_state:  # no charge correction if charge is zero
             return
 
@@ -4219,11 +4431,54 @@ class DefectParserEspresso:
         )
 
 
+def shallow_dopant_binding_energy(
+    eff_mass: float,
+    dielectric: float | np.ndarray | list,
+):
+    """
+    Estimate the binding energy of a shallow dopant /defect in a semiconductor,
+    using effective mass theory.
+
+    Discussion here:
+    https://doped.readthedocs.io/en/latest/Tips.html#perturbed-host-states-shallow-defects
+
+    For delocalised, shallow states (a.k.a. perturbed host states), the
+    hydrogenic effective mass model typically gives quite a good estimate of
+    the binding energy, at least for dispersive 3D semiconductors.
+
+    Note that this formula can also be used to estimate the binding energy of a
+    delocalised (Wannier-Mott) exciton, in which case the reduced effective
+    mass of the electron-hole pair should be used, as:
+
+    .. math::
+
+        μ_reduced = (m_e * m_h) / (m_e + m_h)
+
+    Args:
+        eff_mass (float):
+            Effective mass of the dopant.
+        dielectric (float or int or 3x1 matrix or 3x3 matrix):
+            Total dielectric constant (ionic + static contributions) of the
+            semiconductor host.
+
+    Returns:
+        float: Binding energy of the shallow dopant, in eV.
+    """
+    import scipy.constants as sc
+
+    rydberg_in_eV = sc.physical_constants["Rydberg constant times hc in eV"][0]
+
+    eff_dielectric = _convert_anisotropic_dielectric_to_isotropic_harmonic_mean(
+        _convert_dielectric_to_tensor(dielectric)
+    )
+    return rydberg_in_eV * (eff_mass / eff_dielectric**2)  # in eV
+
+
 
 #----new methods----
 
 from doped.utils.qehacks import PymatgenEspressoHacks
-PymatgenEspressoHacks.patch_pwxml_properties() #Allows setters for pwxml objects. 
+PymatgenEspressoHacks.patch_pwxml_properties() #Allows setters for pwxml objects.
 
 
 import pandas as pd
@@ -4232,7 +4487,7 @@ from pathlib import Path
 
 class FolderHandler:
     """
-    Routines for handling folders, returning bulk and defect folders. 
+    Routines for handling folders, returning bulk and defect folders.
     """
 
     @classmethod
@@ -4323,7 +4578,7 @@ class FolderHandler:
             List of Path objects corresponding to matching `parentdir_relative` paths.
         """
         df_sub = df[df[subset_col].isin(using)]
-        
+
         bulk_path = str(bulk_path).lower() if bulk_path is not None else None
 
         mask = df_sub["parentdir_relative"].apply(
@@ -4334,7 +4589,7 @@ class FolderHandler:
         return df_sub.loc[mask, "grandparent"].drop_duplicates().tolist()
 
     @classmethod
-    def _determine_bulk_path(cls, output_path, possible_bulk_folders, bulk_path=None):
+    def _determine_bulk_path(cls, folderdf):
         """
         Determine the bulk_path from a filtered DataFrame.
 
@@ -4346,37 +4601,54 @@ class FolderHandler:
         Returns:
             str: Absolute path to resolved bulk folder.
         """
-        output_path = Path(output_path)
 
-        if bulk_path is None:
-            if len(possible_bulk_folders) == 1:
-                resolved_bulk = output_path / possible_bulk_folders[0]
-            else:
-                # Try to find a folder ending with "_bulk"
-                bulk_candidates = [folder for folder in possible_bulk_folders if str(folder).lower().endswith("_bulk")]
-                if len(bulk_candidates) == 1:
-                    resolved_bulk = output_path / bulk_candidates[0]
-                else:
-                    raise ValueError(
-                        f"Could not automatically determine bulk supercell calculation folder in "
-                        f"{output_path}. Found {len(possible_bulk_folders)} folders with `vasprun.xml` and 'bulk' in name. "
-                        f"Please specify bulk_path manually."
-                    )
-        else:
-            resolved_bulk = Path(bulk_path)
 
-        # Final existence check
-        if not resolved_bulk.is_dir():
-            if len(possible_bulk_folders) == 1:
-                fallback_path = output_path / possible_bulk_folders[0]
-                if fallback_path.is_dir():
-                    return str(fallback_path)
+        # output_path = Path(output_path)
+
+        # if bulk_path is None:
+        #     if len(possible_bulk_folders) == 1:
+        #         resolved_bulk = output_path / possible_bulk_folders[0]
+        #     else:
+        #         # Try to find a folder ending with "_bulk"
+        #         bulk_candidates = [folder for folder in possible_bulk_folders if str(folder).lower().endswith("_bulk")]
+        #         if len(bulk_candidates) == 1:
+        #             resolved_bulk = output_path / bulk_candidates[0]
+        #         else:
+        #             raise ValueError(
+        #                 f"Could not automatically determine bulk supercell calculation folder in "
+        #                 f"{output_path}. Found {len(possible_bulk_folders)} folders with `vasprun.xml` and 'bulk' in name. "
+        #                 f"Please specify bulk_path manually."
+        #             )
+        # else:
+        #     resolved_bulk = Path(bulk_path)
+
+        # # Final existence check
+        # if not resolved_bulk.is_dir():
+        #     if len(possible_bulk_folders) == 1:
+        #         fallback_path = output_path / possible_bulk_folders[0]
+        #         if fallback_path.is_dir():
+        #             return str(fallback_path)
+        #     raise FileNotFoundError(
+        #         f"Could not find bulk supercell calculation folder at '{resolved_bulk}'!"
+        #     )
+
+        df_bulk = folderdf[folderdf['grandparent'].str.contains('bulk', case=False, na=False)] #Find the files which have a grandparent containing bulk
+        bulks = df_bulk['grandparent'].unique()
+
+        if len(bulks) == 1:
+            resolved_bulk = df_bulk['parentdir'].iloc[0].parent
+            bulk_vr_path = df_bulk[df_bulk['filename'].str.contains('xml')]['full_file_path'].iloc[0]
+
+        elif len(bulks) == 0:
             raise FileNotFoundError(
                 f"Could not find bulk supercell calculation folder at '{resolved_bulk}'!"
             )
+        else:
+            raise FileNotFoundError(
+                f"Too many bulk calculations found '{bulks}'!"
+            )
 
-        return str(resolved_bulk)
-    
+        return str(resolved_bulk), str(bulk_vr_path)
     @classmethod
     def _validate_bulk_subpath(cls, df, bulk_path, subfolder, root_path, code_xml):
         """
@@ -4395,7 +4667,7 @@ class FolderHandler:
         root_path = Path(root_path)
         relative_bulk = bulk_path.relative_to(root_path)
 
-        
+
         # For files in bulk_path/subfolder, find files containing vasprun and xml.
         if subfolder is not None:
             df_files = df[df["parentdir_relative"] == relative_bulk / subfolder]["filename"]
@@ -4405,7 +4677,7 @@ class FolderHandler:
         # If bulk itself has no vasprun*.xml either
         num_code_xml_in_bulk_path = df[
             df["parentdir_relative"] == relative_bulk]['filename'].str.contains(code_xml, regex = True).sum()
-        
+
         if num_code_xml_in_bulk_path == 0:
             # Find code_xml matches which have bulk_path as grandparent.
             candidate_subfolders = df[
@@ -4425,16 +4697,17 @@ class FolderHandler:
 
         # If bulk_path itself contains vasprun.xml files, no need to modify
         return bulk_path
-    
+
     @classmethod
     def _determine_defect_folders(cls,possible_defect_folders, possible_bulk_folders, subfolder, output_path ):
-        defect_folders = [dir
-                            for dir in possible_defect_folders
-                            if dir not in possible_bulk_folders
-                            and (
-                                subfolder in os.listdir(os.path.join(output_path, dir)) or subfolder == "."
-                                )
-        ]
+        defect_folders = []
+        for dir in possible_defect_folders:
+            try:
+                if dir not in possible_bulk_folders and subfolder in os.listdir(os.path.join(output_path, dir)) or subfolder == ".":
+                    defect_folders.append(dir)
+            except:
+                continue
+
         return defect_folders
 
 class DefectsParserEspresso(DefectsParserVasp):
@@ -4477,31 +4750,21 @@ class DefectsParserEspresso(DefectsParserVasp):
         self.bulk_vr = None  # loaded later
         self.kwargs = kwargs
 
-        code_xml =  r'(?=.*espresso)(?=.*xml)'
+        # code_xml =  r'(?=.*espresso)(?=.*xml)'
+        code_xml =  r'(?=.*xml)'
 
         #-------Determine bulk, defect folders-------
         self._df = FolderHandler._folder_to_dataframe(self.output_path)
+
         possible_defect_folders = FolderHandler._find_possible_defect_folders(self._df, code_xml)
         self.subfolder = FolderHandler._determine_subfolder(self._df, possible_defect_folders, code = 'espresso')
-        possible_bulk_folders = FolderHandler._find_possible_bulk_folders(self._df, 
-                                                           subset_col = 'grandparent', 
-                                                           using = possible_defect_folders, 
+        possible_bulk_folders = FolderHandler._find_possible_bulk_folders(self._df,
+                                                           subset_col = 'grandparent',
+                                                           using = possible_defect_folders,
                                                            bulk_path = None)
-        self.bulk_path = FolderHandler._determine_bulk_path(self.output_path, possible_bulk_folders)
-        self.bulk_path = FolderHandler._validate_bulk_subpath(self._df, self.bulk_path, self.subfolder, self.output_path, code_xml)
-
+        self.bulk_path, bulk_vr_path = FolderHandler._determine_bulk_path(self._df)
         self.defect_folders = FolderHandler._determine_defect_folders(possible_defect_folders, possible_bulk_folders, self.subfolder, self.output_path)
 
-        
-        bulk_vr_path, multiple = _get_output_files_and_check_if_multiple("espresso.xml", self.bulk_path)
-        if multiple:
-            _multiple_files_warning(
-                "espresso.xml",
-                self.bulk_path,
-                bulk_vr_path,
-                dir_type="bulk",
-            )
-        
 
         # -------------------Parsers-------------------
         #==Parse bulk and its oxidations states
@@ -4530,6 +4793,7 @@ class DefectsParserEspresso(DefectsParserVasp):
         }
 
         parsed_defect_entries, parsing_warnings = self._parse_defect_folders_and_warnings()
+
         self.defect_dict = self._warn_remove_duplicate_parsed_defect_entries(parsed_defect_entries)
 
 
@@ -4538,8 +4802,6 @@ class DefectsParserEspresso(DefectsParserVasp):
         for name, defect_entry in self.defect_dict.items()
         if defect_entry.calculation_metadata.get("mismatching_POTCAR_symbols")
             ]
-
-        #==Perform corrections and warn
         self._charge_correction()
         self._mismatching_warnings()
 
@@ -4631,13 +4893,12 @@ class DefectsParserEspresso(DefectsParserVasp):
         """
         Charge correction. FNV, Kugamai
         """
-        
+
         FNV_correction_errors = []
         eFNV_correction_errors = []
         defect_thermo = self.get_defect_thermodynamics(check_compatibility=False, skip_dos_check=True)
-        
+
         for name, defect_entry in self.defect_dict.items():
-            # print("CHARGE_CORRECTION: ", name, defect_entry)
             # first check if it's a stable defect:
             fermi_stability_window = defect_thermo._get_in_gap_fermi_level_stability_window(defect_entry)
 
@@ -4793,7 +5054,7 @@ class DefectsParserEspresso(DefectsParserVasp):
             if defect_entry not in entries_to_rename
         }
 
-        
+
         with contextlib.suppress(AttributeError, TypeError):  # sort by supercell frac cooords,
             # to aid deterministic naming:
             entries_to_rename.sort(
@@ -4828,6 +5089,7 @@ class DefectsParserEspresso(DefectsParserVasp):
 
     def _parse_defect_folders_and_warnings(self):
         parsed_defect_entries, parsing_warnings = self._parse_defect_folders()
+
         parsing_warnings = self._process_parsing_warnings(parsing_warnings)
 
         if not parsed_defect_entries:
@@ -4840,7 +5102,7 @@ class DefectsParserEspresso(DefectsParserVasp):
             )
 
         return parsed_defect_entries, parsing_warnings
- 
+
     def _get_bulk_oxi_states(self):
         self._bulk_oxi_states: Structure | Composition | dict | bool = False
         if bulk_struct_w_oxi := guess_and_set_oxi_states_with_timeout(
@@ -4947,7 +5209,7 @@ class DefectsParserEspresso(DefectsParserVasp):
 
     def _parse_defect_folders(self):
         """
-        Parse defect calculation folders (serially or multily), depending on CPU cores available. 
+        Parse defect calculation folders (serially or multily), depending on CPU cores available.
         """
 
         parsed_defect_entries = []
@@ -4960,10 +5222,11 @@ class DefectsParserEspresso(DefectsParserVasp):
 
         # Serial processing
         if self.processes <= 1:
-            # print("SERIAL:")
             with tqdm(self.defect_folders, desc="Parsing defect calculations") as pbar:
+
                 for defect_folder in pbar:
                     pbar.set_description(f"Parsing {defect_folder}/{self.subfolder}".replace("/.", ""))
+
                     parsed_defect_entry, warnings_string, _folder = self._parse_defect_and_handle_warnings(defect_folder)
                     parsing_warnings.append(
                         self._parse_parsing_warnings(warnings_string, defect_folder, f"{defect_folder}/{self.subfolder}")
@@ -4972,14 +5235,13 @@ class DefectsParserEspresso(DefectsParserVasp):
                         parsed_defect_entries.append(parsed_defect_entry)
         # Multiprocessing
         else:
-
             charged_defect_folder = None
             for folder in self.defect_folders:
                 with contextlib.suppress(Exception):
                     if abs(int(folder[-1])) > 0: #last value of folder contains defect charge.
                         charged_defect_folder = folder
                         break
-            
+
             pbar = tqdm(total=len(self.defect_folders))
 
             try:
@@ -5080,6 +5342,9 @@ class DefectsParserEspresso(DefectsParserVasp):
             self.kwargs.update(self.bulk_corrections_data)  # update with bulk corrections data
             defect_path = os.path.join(self.output_path, defect_folder, self.subfolder)
 
+            df = FolderHandler._folder_to_dataframe(defect_path)
+            filename = df[df.filename.str.endswith('xml')]['filename'].iloc[0]
+
             dp = DefectParser(code=self.code).from_paths(
                 defect_path=defect_path,
                 bulk_path=self.bulk_path,
@@ -5091,11 +5356,10 @@ class DefectsParserEspresso(DefectsParserVasp):
                 bulk_band_gap_vr=self.bulk_band_gap_vr,
                 oxi_state=self.kwargs.get("oxi_state") if self._bulk_oxi_states else "Undetermined",
                 parse_projected_eigen=self.parse_projected_eigen,
-                default_filename = "espresso.xml",
+                filename = filename,
                 pp_folder = self.pp_folder,
                 **self.kwargs
             )
-
             if dp.skip_corrections and dp.defect_entry.charge_state != 0 and self.dielectric is None:
                 self.skip_corrections = dp.skip_corrections  # set skip_corrections to True if
                 # dielectric is None and there are charged defects present (shows dielectric warning once)
@@ -5127,3 +5391,126 @@ class DefectsParserEspresso(DefectsParserVasp):
 
         return dp.defect_entry
 
+
+
+from pymatgen.util.typing import PathLike, SpeciesLike
+import warnings
+from pymatgen.io.vasp.inputs import POTCAR_STATS_PATH, UnknownPotcarWarning
+from functools import lru_cache, partialmethod
+from doped.utils.parsing import parse_projected_eigen, find_archived_fname
+
+from pymatgen.io.vasp.outputs import Locpot, Outcar, Procar, Vasprun, _parse_vasp_array
+
+from pymatgen.io.espresso.outputs.pwxml import PWxml
+
+class RunParserEspresso():
+    @classmethod
+    def get_run(cls, espressorun_path: PathLike, parse_mag: bool = False, **kwargs):
+        """
+        Similar to get_vasprun but for espresso.
+
+        if parse_projected_eigen = True: must provide filproj (for pwxml). (Use filproj = 'filproj' for projwfc.x
+        if parse_dos: Must give fildos.
+
+        """
+        espressorun_path = str(espressorun_path)  # convert to string if Path object
+        warnings.filterwarnings(
+            "ignore", category=UnknownPotcarWarning
+        )  # Ignore unknown POTCAR warnings when loading vasprun.xml
+        # pymatgen assumes the default PBE with no way of changing this within get_vasprun())
+        warnings.filterwarnings(
+            "ignore", message="No POTCAR file with matching TITEL fields"
+        )  # `message` only needs to match start of message
+        default_kwargs = {"parse_dos": False, "exception_on_bad_xml": False}
+        default_kwargs.update(kwargs)
+
+        #PWxml._parse_projected_eigen = partialmethod(parse_projected_eigen, parse_mag=parse_mag) #??? Never called in doped? PWxml already has a _parse_projected_eigen though it only accepts filproj.
+        from pymatgen.electronic_structure.core import Spin
+        try:
+            with warnings.catch_warnings(record=True) as w:
+                vasprun = PWxml(find_archived_fname(espressorun_path), **default_kwargs)
+
+
+                #hacks because PWxml does not initialize atomic states and kpoints_opt_props
+                #see https://github.com/Griffin-Group/pymatgen-io-espresso/issues/27
+                vasprun.atomic_states = None
+                #-----------------------------------
+
+            for warning in w:
+                if "XML is malformed" in str(warning.message):
+                    warnings.warn(
+                        f"espresso.xml file at {espressorun_path} is corrupted/incomplete. Attempting to "
+                        f"continue parsing but may fail!"
+                    )
+                else:  # show warning, preserving original category:
+                    warnings.warn(warning.message, category=warning.category)
+
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"espresso.xml not found at {espressorun_path}. Needed for parsing calculation "
+                f"output!"
+            ) from exc
+        return vasprun
+
+
+    @classmethod
+    def _parse_run_and_poss_projwfc(
+        cls,
+        vr_path: PathLike,
+        parse_projected_eigen: bool | None = None,
+        output_path: PathLike | None = None,
+        label: str = "bulk",
+        parse_procar: bool = True,
+        ):
+        procar = None
+
+        failed_eig_parsing_warning_message = (
+            f"Could not parse eigenvalue data from vasprun.xml.gz files in {label} folder at {output_path}"
+        )
+
+        try:
+            #IMPLEMENT: Get run, parse_proj_eigen, parse_eigen = (if demanded but definitely if bulk)
+            vr = cls.get_run(vr_path,
+                                parse_projected_eigen=bool(parse_projected_eigen),
+                                parse_eigen=(bool(parse_projected_eigen) or label == "bulk"),
+                                )# vr.eigenvalues not needed for defects except for vr-only eigenvalue analysis
+        except Exception as vr_exc:
+            vr = cls.get_run(vr_path,
+                            parse_projected_eigen=False,
+                            parse_eigen=label == "bulk")
+            failed_eig_parsing_warning_message += f", got error:\n{vr_exc}"
+
+            if parse_procar:
+                procar_path, multiple = _get_output_files_and_check_if_multiple("PROCAR", output_path)
+                if "PROCAR" in procar_path and parse_projected_eigen is not False:
+                    try:
+                        procar = get_procar(procar_path)
+
+                    except Exception as procar_exc:
+                        failed_eig_parsing_warning_message += (
+                            f"\nThen got the following error when attempting to parse projected eigenvalues "
+                            f"from the defect PROCAR(.gz):\n{procar_exc}"
+                        )
+        if vr.projected_eigenvalues is None and procar is None and parse_projected_eigen is True:
+            # only warn if parse_projected_eigen is set to True (not None)
+            warnings.warn(failed_eig_parsing_warning_message)
+
+        return vr, procar if parse_procar else vr
+
+    @classmethod
+    def ensure_band_edges(cls, vasprun_obj):
+        """Ensure that the Vasprun object has VBM, CBM, and band_gap set."""
+        from doped.utils.eigenvalues import band_edge_properties_from_vasprun
+
+        if not hasattr(vasprun_obj, "vbm") or vasprun_obj.vbm is None \
+        or not hasattr(vasprun_obj, "cbm") or vasprun_obj.cbm is None \
+        or not hasattr(vasprun_obj, "band_gap") or vasprun_obj.band_gap is None:
+
+            band_edge_prop = band_edge_properties_from_vasprun(vasprun_obj)
+
+            if not band_edge_prop.is_metal:
+                vasprun_obj.vbm = band_edge_prop.vbm_info.as_dict()["energy"]
+                vasprun_obj.cbm = band_edge_prop.cbm_info.as_dict()["energy"]
+                vasprun_obj.band_gap = vasprun_obj.cbm - vasprun_obj.vbm
+
+        return vasprun_obj

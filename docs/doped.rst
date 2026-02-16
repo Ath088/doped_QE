@@ -1,14 +1,9 @@
 doped
 =============
 
-Module contents
----------------
-.. automodule:: doped
-   :members:
-   :undoc-members:
-   :show-inheritance:
+See the |DeepWiki| site for an overview of the codebase and workflow diagrams.
 
-Submodules
+Modules
 -----------
 
 .. toctree::
@@ -19,6 +14,7 @@ Submodules
    doped.core
    doped.corrections
    doped.generation
+   doped.init
    doped.thermodynamics
    doped.utils
    doped.vasp

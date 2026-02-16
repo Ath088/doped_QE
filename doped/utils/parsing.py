@@ -4,7 +4,6 @@ Helper functions for parsing defect supercell calculations.
 
 import contextlib
 import itertools
-import logging
 import os
 import re
 import warnings
@@ -16,7 +15,7 @@ import numpy as np
 from monty.io import reverse_readfile
 from monty.serialization import loadfn
 from pymatgen.analysis.defects.core import DefectType
-from pymatgen.analysis.structure_matcher import LinearAssignment, pbc_shortest_vectors
+from pymatgen.analysis.structure_matcher import get_linear_assignment_solution, pbc_shortest_vectors
 from pymatgen.core.periodic_table import Element
 from pymatgen.core.structure import Composition, Lattice, PeriodicSite, Structure
 from pymatgen.electronic_structure.core import Spin
@@ -31,19 +30,6 @@ from doped.core import DefectEntry, remove_site_oxi_state
 @lru_cache(maxsize=1000)  # cache POTCAR generation to speed up generation and writing
 def _get_potcar_summary_stats() -> dict:
     return loadfn(POTCAR_STATS_PATH)
-
-
-@contextlib.contextmanager
-def suppress_logging(level=logging.CRITICAL):
-    """
-    Context manager to catch and suppress logging messages.
-    """
-    previous_level = logging.root.manager.disable  # store the current logging level
-    logging.disable(level)  # disable logging at the specified level
-    try:
-        yield
-    finally:
-        logging.disable(previous_level)  # restore the original logging level
 
 
 def find_archived_fname(fname, raise_error=True):
@@ -363,8 +349,8 @@ def _get_output_files_and_check_if_multiple(
     )  # so `get_X()` will raise an informative FileNotFoundError
 
 def _get_output_files_warn_if_multiple(
-    output_file: PathLike = "vasprun.xml", 
-    path: PathLike = ".", 
+    output_file: PathLike = "vasprun.xml",
+    path: PathLike = ".",
     dir_type: None | str = None,
     quiet: bool = False
 ) -> tuple[PathLike, bool]:
@@ -771,7 +757,7 @@ def find_missing_idx(
     # below the threshold tolerance (as in ``StructureMatcher_scan_stol()``), but in practice this
     # function seems to be incredibly fast as is. Can revisit if it ever becomes a bottleneck
     _vecs, d_2 = pbc_shortest_vectors(lattice, subset, superset, return_d2=True)
-    site_matches = LinearAssignment(d_2).solution  # matching superset indices, of len(subset)
+    site_matches, _ = get_linear_assignment_solution(d_2)  # matching superset indices, of len(subset)
 
     return next(iter(set(np.arange(len(superset), dtype=int)) - set(site_matches)))
 
@@ -835,9 +821,9 @@ def get_wigner_seitz_radius(lattice: Structure | Lattice) -> float:
     Calculates the Wigner-Seitz radius of the structure, which corresponds to
     the maximum radius of a sphere fitting inside the cell.
 
-    Uses the ``calc_max_sphere_radius`` function from ``pydefect``, with a
-    wrapper to avoid unnecessary logging output and warning suppression from
-    ``vise``.
+    Templated on the ``calc_max_sphere_radius`` function from ``pydefect``,
+    but rewritten to avoid calling ``vise`` which causes hanging on Windows.
+    (https://github.com/SMTG-Bham/doped/issues/147).
 
     Args:
         lattice (Union[Structure,Lattice]):
@@ -849,21 +835,12 @@ def get_wigner_seitz_radius(lattice: Structure | Lattice) -> float:
             The Wigner-Seitz radius of the structure.
     """
     lattice_matrix = lattice.matrix if isinstance(lattice, Lattice) else lattice.lattice.matrix
-
-    # avoid vise/pydefect warning suppression and INFO messages:
-    with suppress_logging(), warnings.catch_warnings():
-        try:
-            from pydefect.cli.vasp.make_efnv_correction import calc_max_sphere_radius
-
-            return calc_max_sphere_radius(lattice_matrix)
-
-        except ImportError:  # vise/pydefect not installed
-            distances = np.zeros(3, dtype=float)  # copied over from pydefect v0.9.4
-            for i in range(3):
-                a_i_a_j = np.cross(lattice_matrix[i - 2], lattice_matrix[i - 1])
-                a_k = lattice_matrix[i]
-                distances[i] = abs(np.dot(a_i_a_j, a_k)) / np.linalg.norm(a_i_a_j)
-            return max(distances) / 2.0
+    distances = np.zeros(3, dtype=float)  # copied over from pydefect v0.9.4; avoid vise issues
+    for i in range(3):
+        a_i_a_j = np.cross(lattice_matrix[i - 2], lattice_matrix[i - 1])
+        a_k = lattice_matrix[i]
+        distances[i] = abs(np.dot(a_i_a_j, a_k)) / np.linalg.norm(a_i_a_j)
+    return max(distances) / 2.0
 
 
 def check_atom_mapping_far_from_defect(
@@ -956,7 +933,7 @@ def check_atom_mapping_far_from_defect(
             else (bulk_species_outside_near_ws_coords, defect_species_outside_ws_coords)
         )
         vecs, d_2 = pbc_shortest_vectors(bulk_supercell.lattice, subset, superset, return_d2=True)
-        site_matches = LinearAssignment(d_2).solution  # matching superset indices, of len(subset)
+        site_matches, _ = get_linear_assignment_solution(d_2)  # matching superset indices, of len(subset)
         matching_vecs = vecs[np.arange(len(site_matches)), site_matches]
         displacements = np.linalg.norm(matching_vecs, axis=1)
         far_from_defect_disps[species.name].extend(
@@ -1251,10 +1228,10 @@ def _compare_kpoints(
 ):
     """
     Check bulk and defect KPOINTS are the same, using the
-    Vasprun.actual_kpoints lists (i.e. the VASP IBZKPTs essentially).
+    ``Vasprun.actual_kpoints`` lists (i.e. the VASP IBZKPTs essentially).
 
-    Returns True if the KPOINTS match, otherwise returns a list of the KPOINTS
-    for the bulk and defect calculations.
+    Returns ``True`` if the KPOINTS match, otherwise returns a list of the
+    KPOINTS for the bulk and defect calculations.
     """
     # sort kpoints, in case same KPOINTS just different ordering:
     sorted_bulk_kpoints = sorted(np.array(bulk_actual_kpoints), key=tuple)
@@ -1265,17 +1242,26 @@ def _compare_kpoints(
     )
     # if different symmetry settings used (e.g. for bulk), actual_kpoints can differ but are the same
     # input kpoints, which we assume is fine:
-    kpoints_eq = bulk_kpoints.kpts == defect_kpoints.kpts if bulk_kpoints and defect_kpoints else True
+    kpoints_eq = (
+        (
+            bulk_kpoints.kpts == defect_kpoints.kpts
+            and np.allclose(bulk_kpoints.kpts_shift, defect_kpoints.kpts_shift)
+        )
+        if bulk_kpoints and defect_kpoints
+        else False
+    )
 
     if not (actual_kpoints_eq or kpoints_eq):
         if warn:
-            warnings.warn(
+            formatted_defect_kpts = [[float(kpt) for kpt in kpoints] for kpoints in sorted_defect_kpoints]
+            formatted_bulk_kpts = [[float(kpt) for kpt in kpoints] for kpoints in sorted_bulk_kpoints]
+            warnings.warn(  # list form is more readable
                 f"The KPOINTS for your {defect_name} and {bulk_name} calculations do not match, which is "
                 f"likely to cause errors in the parsed results. Found the following KPOINTS in the "
                 f"{defect_name} calculation:"
-                f"\n{[list(kpoints) for kpoints in sorted_defect_kpoints]}\n"  # list form is more readable
+                f"\n{formatted_defect_kpts}\n"
                 f"and in the {bulk_name} calculation:"
-                f"\n{[list(kpoints) for kpoints in sorted_bulk_kpoints]}\n"
+                f"\n{formatted_bulk_kpts}\n"
                 f"In general, the same KPOINTS settings should be used for all final calculations for "
                 f"accurate results!"
             )
@@ -1288,12 +1274,13 @@ def _compare_kpoints(
 
 
 def _compare_incar_tags(
-    bulk_incar_dict,
-    defect_incar_dict,
-    fatal_incar_mismatch_tags=None,
-    bulk_name="bulk",
-    defect_name="defect",
-    warn=True,
+    bulk_incar_dict: dict[str, str | int | float],
+    defect_incar_dict: dict[str, str | int | float],
+    fatal_incar_mismatch_tags: dict[str, str | int | float] | None = None,
+    ignore_tags: set[str] | None = None,
+    bulk_name: str = "bulk",
+    defect_name: str = "defect",
+    warn: bool = True,
 ):
     """
     Check bulk and defect INCAR tags (that can affect energies) are the same.
@@ -1302,7 +1289,7 @@ def _compare_incar_tags(
     the mismatching tags.
     """
     if fatal_incar_mismatch_tags is None:
-        fatal_incar_mismatch_tags = {  # dict of tags that can affect energies and their defaults
+        fatal_incar_mismatch_tags = {  # dict of tags that can affect energies and their defaults in VASP
             "AEXX": 0.25,  # default 0.25
             "ENCUT": 0,
             "LREAL": False,  # default False
@@ -1316,6 +1303,11 @@ def _compare_incar_tags(
             "PRECFOCK": "Normal",  # default Normal
             "LDAU": False,  # default False
             "NKRED": 1,  # default 1
+            "LSORBIT": False,  # default False
+        }
+    if ignore_tags is not None:
+        fatal_incar_mismatch_tags = {
+            key: val for key, val in fatal_incar_mismatch_tags.items() if key not in ignore_tags
         }
 
     def _compare_incar_vals(val1, val2):
@@ -1437,10 +1429,10 @@ def get_magnetization_from_vasprun(vasprun: Vasprun) -> int | float | np.ndarray
         # non-spin-polarised or NCL calculation:
         if not vasprun.parameters.get("LNONCOLLINEAR", False):
             return 0  # non-spin polarised calculation
-        if getattr(vasprun, "projected_magnetisation", None) is None:
+        if getattr(vasprun, "projected_magnetization", None) is None:
             raise RuntimeError(
                 "Cannot determine magnetization from non-collinear Vasprun calculation, as this requires "
-                "the `Vasprun.projected_magnetisation` attribute, which is parsed with "
+                "the `Vasprun.projected_magnetization` attribute, which is parsed with "
                 "`Vasprun(parse_projected_eigen=True)` (default in `doped`)."
             )
 
@@ -1453,11 +1445,11 @@ def get_magnetization_from_vasprun(vasprun: Vasprun) -> int | float | np.ndarray
         )  # avoid division by zero, by setting any zero values to 1
         normalisation_factors = 1 / summed_orbital_projections
 
-        # vasprun.projected_magnetisation.shape -> (nkpoints, nbands, natoms, norbitals, 3 -- x/y/z)
+        # vasprun.projected_magnetization.shape -> (nkpoints, nbands, natoms, norbitals, 3 -- x/y/z)
         # sum the projected magnetization over atoms and orbitals, then multiply by per-band/kpoint
         # normalisation factors:
         normalised_proj_mag_per_kpoint_band_direction = (
-            vasprun.projected_magnetisation.sum(axis=(-3, -2)) * normalisation_factors[..., None]
+            vasprun.projected_magnetization.sum(axis=(-3, -2)) * normalisation_factors[..., None]
         )  # [..., None] adds new axis, which allows broadcasting (i.e.
         # (nkpoints, nbands, 3) * (nkpoints, nbands, 1) -- adding the "(...,1 )" dimension)
 
@@ -1507,7 +1499,7 @@ def get_nelect_from_vasprun(vasprun: Vasprun) -> int | float:
     return round(nelect, 2)
 
 
-def get_neutral_nelect_from_vasprun(vasprun: Vasprun, skip_potcar_init: bool = False) -> int | float:
+def get_neutral_nelect_from_vasprun(vasprun: Vasprun, skip_potcar_init: bool = False) -> int:
     """
     Determine the number of electrons (``NELECT``) from a ``Vasprun`` object,
     corresponding to a neutral charge state for the structure.
@@ -1521,7 +1513,7 @@ def get_neutral_nelect_from_vasprun(vasprun: Vasprun, skip_potcar_init: bool = F
             engineer ``NELECT`` using the ``DefectDictSet``.
 
     Returns:
-        int or float:
+        int:
             The number of electrons in the system for a neutral charge state.
     """
     nelect = None
@@ -1551,7 +1543,7 @@ def get_neutral_nelect_from_vasprun(vasprun: Vasprun, skip_potcar_init: bool = F
                 )
             )
     if nelect is not None:
-        return nelect
+        return int(nelect)
 
     # else try reverse engineer NELECT using DefectDictSet
     from doped.vasp import DefectDictSet
@@ -1560,11 +1552,13 @@ def get_neutral_nelect_from_vasprun(vasprun: Vasprun, skip_potcar_init: bool = F
     potcar_settings = {symbol.split("_")[0]: symbol for symbol in potcar_symbols}
     with warnings.catch_warnings():  # ignore POTCAR warnings if not available
         warnings.simplefilter("ignore", UserWarning)
-        nelect = DefectDictSet(
-                    vasprun.structures[-1],
-                    charge_state=0,
-                    user_potcar_settings=potcar_settings,
-                ).nelect
+        return int(
+            DefectDictSet(
+                vasprun.structures[-1],
+                charge_state=0,
+                user_potcar_settings=potcar_settings,
+            ).nelect
+        )
 
         return nelect
 
@@ -1855,7 +1849,7 @@ def spin_degeneracy_from_vasprun(vasprun: Vasprun, charge_state: int | None = No
 
         # spin multiplicity = 2S + 1 = 2(mag/2) + 1 = mag + 1 (where mag is in Bohr magnetons
         # i.e. number of electrons, as in VASP):
-        return magnetization + 1
+        return abs(magnetization) + 1
 
     except (RuntimeError, TypeError):  # NCL calculation without parsed projected magnetization:
         return _simple_spin_degeneracy_from_num_electrons(int(num_electrons))  # guess from charge
@@ -1880,87 +1874,48 @@ def _simple_spin_degeneracy_from_num_electrons(num_electrons: int = 0) -> int:
     return int(num_electrons % 2 + 1)
 
 
-def total_charge_from_vasprun(vasprun: Vasprun, charge_state: int | None, code: str = 'vasp', pp_folder: str | PathLike | None = None) -> int:
+def total_charge_from_vasprun(vasprun: Vasprun, code: str = 'vasp', pp_folder: str | PathLike | None = None) -> int:
     """
     Determine the total charge state of a system from the vasprun, and compare
     to the expected charge state if provided.
+
+    Note that if the system is charged, then this function relies on access to
+    ``POTCAR`` data, which can be setup with ``pymatgen`` as detailed on the
+    installation page here:
+    https://doped.readthedocs.io/en/latest/Installation.html#setup-potcars-and-materials-project-api
 
     Args:
         vasprun (Vasprun):
             ``pymatgen`` ``Vasprun`` object for which to determine the total
             charge.
-        charge_state (int):
-            Expected charge state, to check if it matches the auto-determined
-            charge state.
         code (str):
             String to judge which neutral_nelect procedure to use.
-        pp_folder (str | PathLike): 
-            Folder which contains pseudopotential files. For QE currently. 
+        pp_folder (str | PathLike):
+            Folder which contains pseudopotential files. For QE currently.
 
     Returns:
-        int: The auto-determined charge state.
+        int or None:
+            The total charge state, or ``None`` if it cannot be determined.
     """
+    if (nelect := vasprun.incar.get("NELECT")) is None:
+        return 0  # neutral if NELECT not specified
+
     auto_charge = None
+    with contextlib.suppress(Exception):  # otherwise determine neutral NELECT from vasprun & POTCARs:
+        nelect = get_nelect_from_vasprun(vasprun)
 
-    try:
-        if get_nelect_from_vasprun(vasprun) is None:
-            auto_charge = 0  # neutral if NELECT not specified
+        if code == 'vasp':
+            neutral_nelect = get_neutral_nelect_from_vasprun(vasprun)
+        elif code == 'espresso':
+            neutral_nelect = RunParser('espresso')._get_neutral_nelect_from_pp(vasprun, pp_folder)
 
-        else:
-            nelect = get_nelect_from_vasprun(vasprun)
-            if code == 'vasp':
-                neutral_nelect = get_neutral_nelect_from_vasprun(vasprun)
-            elif code == 'espresso':
-                neutral_nelect = RunParser('espresso')._get_neutral_nelect_from_pp(vasprun, pp_folder)
+        auto_charge = -1 * (nelect - neutral_nelect)
+
+        if abs(auto_charge) >= 10 and code=="vasp":
+            neutral_nelect = get_neutral_nelect_from_vasprun(vasprun, skip_potcar_init=True)
             auto_charge = -1 * (nelect - neutral_nelect)
 
-            if auto_charge is None or abs(auto_charge) >= 10:
-                neutral_nelect = get_neutral_nelect_from_vasprun(vasprun, skip_potcar_init=True)
-                try:
-                    auto_charge = -1 * (nelect - neutral_nelect)
-
-                except Exception as e:
-                    auto_charge = None
-                    if charge_state is None:
-                        raise RuntimeError(
-                            "System charge cannot be automatically determined as POTCARs have not been "
-                            "setup with pymatgen (see Step 2 at "
-                            "https://github.com/SMTG-Bham/doped#installation). Please specify charge "
-                            "state manually using the `charge_state` argument, or set up POTCARs with "
-                            "pymatgen."
-                        ) from e
-
-            if auto_charge is not None and abs(auto_charge) >= 10:  # crazy charge state predicted
-                raise RuntimeError(
-                    f"Auto-determined system charge q={int(auto_charge):+} is unreasonably large. "
-                    f"Please specify system charge manually using the `charge` argument."
-                )
-
-        if (
-            charge_state is not None
-            and auto_charge is not None
-            and int(charge_state) != int(auto_charge)
-            and abs(auto_charge) < 5
-        ):
-            warnings.warn(
-                f"Auto-determined system charge q={int(auto_charge):+} does not match specified charge "
-                f"q={int(charge_state):+}. Will continue with specified charge_state, but beware!"
-            )
-
-        if charge_state is None and auto_charge is not None:
-            charge_state = auto_charge
-
-    except Exception as e:
-        if charge_state is None:
-            raise e
-
-    if charge_state is None:
-        raise RuntimeError(
-            "System charge could not be automatically determined from the calculation outputs. "
-            "Please manually specify charge state using the `charge_state` argument."
-        )
-
-    return charge_state
+    return auto_charge
 
 
 def _get_bulk_locpot_dict(bulk_path, quiet=False, filename = "LOCPOT"):
@@ -2011,6 +1966,46 @@ def _multiple_files_warning(file_type, directory, chosen_filepath, action=None, 
     )
 
 
+def get_dimer_bonds(structure: Structure, rtol: float = 1.05) -> dict[str, list[float]]:
+    """
+    Get a dictionary of all homoionic (dimer) bonds in the structure.
+
+    This function uses the ``get_homoionic_bonds`` and
+    ``get_dimer_bond_length`` functions from ``shakenbreak`` to identify dimer
+    bonds in the structure (where any pair of atoms of the same element with
+    distance < ``rtol * get_dimer_bond_length(elt, elt)`` are considered a
+    dimer bond), returning a dictionary of the site names and the dimer bond
+    length.
+
+    Args:
+        structure (Structure): The structure to get the dimer bond lengths for.
+        rtol (float):
+            The relative tolerance to use for classifying bonds as dimer bonds,
+            where distances < ``rtol * get_dimer_bond_length(elt, elt)`` are
+            considered dimer bonds. Default is 1.05.
+
+    Returns:
+        dict[str, list[float]]:
+            A dictionary of element names with values being sub-dictionaries of
+            site names and their homoionic neighbours and distances (in Å)
+            which are classified as dimer bonds.
+            (e.g. {'O': {'O(1)': {'O(3)': '1.44 Å'}}})
+    """
+    from shakenbreak.analysis import get_homoionic_bonds
+    from shakenbreak.distortions import get_dimer_bond_length
+
+    dimer_bond_dict = {
+        str(elt): get_homoionic_bonds(
+            structure=structure,
+            elements=str(elt),
+            radius=rtol * get_dimer_bond_length(elt, elt),
+            verbose=False,
+        )
+        for elt in structure.composition.elements
+    }
+    return {k: v for k, v in dimer_bond_dict.items() if v}
+
+
 
 from pymatgen.entries.computed_entries import ComputedEntry
 from doped.utils.parsing import parse_projected_eigen, find_archived_fname
@@ -2033,8 +2028,8 @@ class RunParser:
 
 class RunParserEspresso():
     @classmethod
-    def get_run(cls, espressorun_path: PathLike, 
-                parse_mag: bool = False, 
+    def get_run(cls, espressorun_path: PathLike,
+                parse_mag: bool = False,
                 standardize = True,
                 **kwargs):
         """
@@ -2061,15 +2056,15 @@ class RunParserEspresso():
             with warnings.catch_warnings(record=True) as w:
 
                 # if standardize:
-                #     vasprun = cls.standardized_computed_entry(find_archived_fname(espressorun_path), 
-                #                                             **default_kwargs) 
+                #     vasprun = cls.standardized_computed_entry(find_archived_fname(espressorun_path),
+                #                                             **default_kwargs)
                 # else:
                 vasprun = PWxml(find_archived_fname(espressorun_path), **default_kwargs)
-                
+
                 #hacks because PWxml does not initialize atomic states and kpoints_opt_props
                 #see https://github.com/Griffin-Group/pymatgen-io-espresso/issues/27
                 vasprun.atomic_states = None
-                
+
                 # if isinstance(vasprun.potcar_spec, list):
                 #     vasprun.potcar_spec = cls.potcar_spec_fix(vasprun)
                 #-----------------------------------
@@ -2107,15 +2102,15 @@ class RunParserEspresso():
 
         try:
             # Get run, parse_proj_eigen (if demanded), parse_eigen (if demanded) but definitely if bulk
-            vr = cls.get_run(vr_path, 
+            vr = cls.get_run(vr_path,
                                 parse_projected_eigen=bool(parse_projected_eigen),
-                                parse_eigen=(bool(parse_projected_eigen) or label == "bulk"),            
+                                parse_eigen=(bool(parse_projected_eigen) or label == "bulk"),
                                 )# vr.eigenvalues not needed for defects except for vr-only eigenvalue analysis
-        
+
         except Exception as vr_exc:
             # Get run, don't parse_proj_eigen, parse_eigen if bulkrun.
-            vr = cls.get_run(vr_path, 
-                            parse_projected_eigen=False, 
+            vr = cls.get_run(vr_path,
+                            parse_projected_eigen=False,
                             parse_eigen=label == "bulk")
             failed_eig_parsing_warning_message += f", got error:\n{vr_exc}"
 
@@ -2156,9 +2151,9 @@ class RunParserEspresso():
             if not hasattr(vasprun_obj, "vbm") or vasprun_obj.vbm is None \
             or not hasattr(vasprun_obj, "cbm") or vasprun_obj.cbm is None \
             or not hasattr(vasprun_obj, "band_gap") or vasprun_obj.band_gap is None:
-                
+
                 band_edge_prop = band_edge_properties_from_vasprun(vasprun_obj)
-                
+
                 if not band_edge_prop.is_metal:
                     vasprun_obj.vbm = band_edge_prop.vbm_info.as_dict()["energy"]
                     vasprun_obj.cbm = band_edge_prop.cbm_info.as_dict()["energy"]
@@ -2209,8 +2204,12 @@ class RunParserEspresso():
                     line = line.strip()
                     if "z_valence" in line:
                         if "=" in line:
-                            val = line.split("=")[1].split()[0]
-                            return float(val.strip('"'))
+                            m = re.search(r'z_valence\s*=\s*"([^"]*)"', line)
+                            if not m:
+                                return None  # or raise error
+                            
+                            raw = m.group(1).strip().replace(" ", "")
+                            return float(raw)
                         elif "<z_valence>" in line:
                             val = line.split(">")[1].split("<")[0]
                             return float(val.strip('"'))
@@ -2250,7 +2249,7 @@ class RunParserEspresso():
             total_nelect += count * zval
 
         return round(total_nelect, 6)
-    
+
     @classmethod
     def get_locpot(cls, locpot_path: PathLike):
         """
@@ -2268,6 +2267,49 @@ class RunParserEspresso():
                 f"Freysoldt (FNV) image charge correction!"
             ) from None
         return locpot
+
+    # @classmethod
+    # def potcar_spec_fix(cls, vasprun_obj):
+    #     """
+    #     Converts QE-style pseudopotential filenames to VASP-style potcar_spec dictionaries
+    #     by extracting the element and pseudopotential type from the filename.
+
+    #     Parameters:
+    #         vasprun_obj: An object with `potcar_spec` as a list of pseudopotential filenames.
+
+    #     Returns:
+    #         List[dict]: VASP-style potcar_spec list.
+    #     """
+    #     import re
+    #     qe_pseudos = vasprun_obj.potcar_spec
+    #     vasp_specs = []
+
+    #     for pseudo in qe_pseudos:
+    #         # Extract element (first word or token before `_` or `.`)
+    #         element_match = re.match(r'^([A-Za-z]+)', pseudo)
+    #         element = element_match.group(1).capitalize() if element_match else "X"
+
+    #         # Infer functional (e.g., PBE, LDA)
+    #         functional_match = re.search(r'_(pbe|lda|pw91|revpbe)', pseudo, re.IGNORECASE)
+    #         functional = functional_match.group(1).upper() if functional_match else "PBE"
+
+    #         # Infer potential type (PAW/USPP)
+    #         if 'paw' in pseudo.lower():
+    #             method = "PAW"
+    #         elif 'uspp' in pseudo.lower():
+    #             method = "USPP"
+    #         else:
+    #             method = "PAW"  # default guess
+
+    #         titel = f"{method}_{functional} {element} UNKNOWN"
+
+    #         vasp_specs.append({
+    #             'titel': titel,
+    #             'hash': None,
+    #             'summary_stats': {}
+    #         })
+
+    #     return vasp_specs
 
     @classmethod
     def _get_core_site_potentials(cls, cube_file=None, data=None, atoms=None, radius_bohr=1.1, n_points=5000, verbose = False):
@@ -2289,7 +2331,7 @@ class RunParserEspresso():
             values = map_coordinates(data, grid_points.T, order=1, mode='wrap')
             return np.mean(values)
 
-        
+
         # === Load data if a file path is provided ===
         if cube_file:
             data, atoms = read_cube_data(cube_file)
@@ -2307,14 +2349,14 @@ class RunParserEspresso():
         for i, pos in enumerate(positions):
             avg_pot = spherical_average(pos, radius_ang, data, cell, n_points=n_points)
             core_potentials.append(avg_pot)
-            if verbose: 
+            if verbose:
                 print(f"{atoms[i].symbol:<6}{i+1:>6}{avg_pot:>30.6f}")
 
         core_dict = {'site_potentials': np.array(core_potentials),
                     'atoms': atoms,
                     'positions': positions
         }
-                
+
         return core_dict
 
 
@@ -2337,46 +2379,46 @@ class RunParserEspresso():
            "correction": 0, #pristine_calc.get_computed_entry(entry_id = "").correction
            #"structure": computed_entry.structure
         }
-        
+
         #print(computed_entry.structure)
         ent = ComputedEntry.from_dict(d_) #Computed entries list. Why twice?
         ent.structure = computed_entry.structure
 
         return ent
-    
+
     @classmethod
     def _standardize_total_energy(cls, struct):
         """
-        Hack for PWxml. PWxml puts energy as the formation energy. 
+        Hack for PWxml. PWxml puts energy as the formation energy.
         Might need to be changed if PWxml updates.
         """
-        
+
         e_bulk = struct.energy
         composition = struct.composition
 
         comp_dict = composition.as_data_dict()['unit_cell_composition']
-        
-        elements = [k.name for k in struct.elements] 
+
+        elements = [k.name for k in struct.elements]
         n_i = np.array(list(comp_dict.values()))
         u_i = np.array([cls._get_element_formation_energy(elem) for elem in elements])
-        
+
         std_form_energy = (e_bulk - np.sum(n_i*u_i))/np.sum(n_i)
 
         return std_form_energy
-    
+
     @classmethod
-    def _get_element_formation_energy(cls, 
-                                     elem, 
+    def _get_element_formation_energy(cls,
+                                     elem,
                                      pseudo = 'pbe',
                                      root = Path('/home/fes33/Documents/GIK - R&D/Personal - Papers and Reports/--Libraries/abinit/jhr/data/formation_energies')
                                      ):
-        
+
         elem_file = root / elem / f"{elem}_{pseudo}.xml"
 
         comp_entry = PWxml(elem_file).get_computed_entry(entry_id = "")
         n_atoms = comp_entry.composition.as_data_dict()["unit_cell_composition"][elem]
-        
+
         energy = comp_entry.energy
-        
+
         en_per_atom = energy/n_atoms
         return en_per_atom
