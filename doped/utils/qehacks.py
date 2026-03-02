@@ -44,8 +44,8 @@ class PymatgenEspressoHacks:
         properties_to_patch = [
             "projected_eigenvalues",
             "projected_magnetisation",
-            #"atomic_states",
-            #"kpoints_opt_props",  # Others you may want to override
+            "atomic_states",
+            "kpoints_opt_props",  # Others you may want to override
         ]
 
         for prop in properties_to_patch:

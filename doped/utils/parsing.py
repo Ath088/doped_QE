@@ -26,6 +26,7 @@ from pymatgen.util.typing import PathLike, SpeciesLike
 from typing import Literal
 from pathlib import Path
 from doped.core import DefectEntry, remove_site_oxi_state
+from scipy.interpolate import RegularGridInterpolator
 
 @lru_cache(maxsize=1000)  # cache POTCAR generation to speed up generation and writing
 def _get_potcar_summary_stats() -> dict:
@@ -315,7 +316,7 @@ def _get_output_files_and_check_if_multiple(
     Args:
         output_file (PathLike):
             The filename to search for (case-insensitive). Should be either
-            ``vasprun.xml``, ``OUTCAR``, ``LOCPOT`` or ``PROCAR``.
+            ``vasprun.xml``, ``OUTCAR``, ``LOCPOT`` or ``PROCAR`` or ``.cube``.
         path (PathLike):
             The path to the directory to search in.
 
@@ -1953,6 +1954,7 @@ _vasp_file_parsing_action_dict = {
     "vasprun.xml": "parse the calculation energy and metadata.",
     "OUTCAR": "parse core levels and compute the Kumagai (eFNV) image charge correction.",
     "LOCPOT": "parse the electrostatic potential and compute the Freysoldt (FNV) charge correction.",
+    ".cube": "parse electrostatic potentials (average/core) to compute charged defect corrections in QE"
 }
 
 
@@ -2012,6 +2014,8 @@ from doped.utils.parsing import parse_projected_eigen, find_archived_fname
 from pymatgen.io.espresso.outputs.pwxml import PWxml
 from ase.io.cube import read_cube_data
 from scipy.ndimage import map_coordinates
+from pymatgen.io.common import VolumetricData
+from pymatgen.core.units import Ry_to_eV
 BOHR_TO_ANGSTROM = 0.529177
 
 class RunParser:
@@ -2164,26 +2168,26 @@ class RunParserEspresso():
 
 
     @classmethod
-    def _get_bulk_locpot_dict(cls, bulk_path, quiet=False):
+    def _get_bulk_cube_dict(cls, bulk_path, quiet=False):
 
-        bulk_locpot_path, multiple = _get_output_files_warn_if_multiple(filename, bulk_path, dir_type="bulk")
+        bulk_cube_path, multiple = _get_output_files_warn_if_multiple(filename, bulk_path, dir_type="bulk")
 
-        bulk_locpot = cls.get_locpot(bulk_locpot_path)
-        return {str(k): bulk_locpot.get_average_along_axis(k) for k in [0, 1, 2]}
+        bulk_cube = cls.get_cube(bulk_cube_path)
+        return {str(k): bulk_cube.get_average_along_axis(k) for k in [0, 1, 2]}
 
     @classmethod
     def _get_bulk_site_potentials(cls, bulk_path: PathLike, quiet: bool = False, total_energy: list | float | None = None
     ):
-        # TODO
-        bulk_outcar_path, multiple = _get_output_files_and_check_if_multiple("OUTCAR", bulk_path)
+        # TODO bulk site potentials need to be read from cube files
+        bulk_cube_path, multiple = _get_output_files_and_check_if_multiple(".cube", bulk_path)
         if multiple and not quiet:
             _multiple_files_warning(
-                "OUTCAR",
+                ".cube",
                 bulk_path,
-                bulk_outcar_path,
+                bulk_cube_path,
                 dir_type="bulk",
             )
-        return get_core_potentials_from_outcar(bulk_outcar_path, dir_type="bulk", total_energy=total_energy)
+        return cls._get_core_site_potentials(bulk_cube_path)
 
     @classmethod
     def _get_neutral_nelect_from_pp(cls, vasprun: Vasprun, pp_folder: str | Path) -> float:
@@ -2251,22 +2255,21 @@ class RunParserEspresso():
         return round(total_nelect, 6)
 
     @classmethod
-    def get_locpot(cls, locpot_path: PathLike):
+    def get_cube(cls, cube_path: PathLike):
         """
         Read the ``LOCPOT(.gz)`` file as a ``pymatgen`` ``Locpot`` object.
         """
-        from pymatgen.io.common import VolumetricData
 
-        locpot_path = str(locpot_path)  # convert to string if Path object
+        cube_path = str(cube_path)  # convert to string if Path object
+
         try:
-            #locpot = Locpot.from_file(find_archived_fname(locpot_path))
-            locpot = VolumetricData.from_cube(locpot_path)
+            cube = VolumetricData.from_cube(cube_path)
         except FileNotFoundError:
             raise FileNotFoundError(
-                f"LOCPOT file not found at {locpot_path}(.gz/.xz/.bz/.lzma). Needed for calculating the "
+                f"Cube file not found at {cube_path}(.gz/.xz/.bz/.lzma). Needed for calculating the "
                 f"Freysoldt (FNV) image charge correction!"
             ) from None
-        return locpot
+        return cube
 
     # @classmethod
     # def potcar_spec_fix(cls, vasprun_obj):
@@ -2312,14 +2315,22 @@ class RunParserEspresso():
     #     return vasp_specs
 
     @classmethod
-    def _get_core_site_potentials(cls, cube_file=None, data=None, atoms=None, radius_bohr=1.1, n_points=5000, verbose = False):
+    def _get_core_site_potentials(cls,
+            cube_file=None,
+            data=None,
+            atoms=None,
+            radius_bohr=1.5,
+            n_points=500000,
+            verbose=False,
+    ):
         """Calculate spherical average potential at atomic sites from a .cube file or preloaded data."""
+        BOHR_TO_ANGSTROM = 0.529177
 
-        def spherical_average(pos, radius, data, cell, n_points=5000):
+        def spherical_average(pos, radius, data, cell, n_points=500000):
             """Compute spherical average of potential field around a point."""
             rand_dirs = np.random.normal(size=(n_points, 3))
             rand_dirs /= np.linalg.norm(rand_dirs, axis=1)[:, None]
-            rand_radii = np.random.rand(n_points) ** (1/3) * radius
+            rand_radii = np.random.rand(n_points) ** (1 / 3) * radius
             sample_points = pos + rand_dirs * rand_radii[:, None]
 
             # Convert to fractional coordinates and then grid indices
@@ -2328,14 +2339,12 @@ class RunParserEspresso():
             grid_points = frac * (np.array(data.shape) - 1)
 
             # Interpolate potential values
-            values = map_coordinates(data, grid_points.T, order=1, mode='wrap')
+            values = map_coordinates(data, grid_points.T, order=1, mode="wrap")
             return np.mean(values)
-
 
         # === Load data if a file path is provided ===
         if cube_file:
             data, atoms = read_cube_data(cube_file)
-
         elif data is None or atoms is None:
             raise ValueError("You must provide either `cube_file` or both `data` and `atoms`.")
 
@@ -2350,11 +2359,12 @@ class RunParserEspresso():
             avg_pot = spherical_average(pos, radius_ang, data, cell, n_points=n_points)
             core_potentials.append(avg_pot)
             if verbose:
-                print(f"{atoms[i].symbol:<6}{i+1:>6}{avg_pot:>30.6f}")
+                print(f"{atoms[i].symbol:<6}{i + 1:>6}{avg_pot:>30.6f}")
 
-        core_dict = {'site_potentials': np.array(core_potentials),
-                    'atoms': atoms,
-                    'positions': positions
+        core_dict = {
+            "site_potentials": np.array(core_potentials) * Ry_to_eV,
+            "atoms": atoms,
+            "positions": positions,
         }
 
         return core_dict
@@ -2410,7 +2420,7 @@ class RunParserEspresso():
     def _get_element_formation_energy(cls,
                                      elem,
                                      pseudo = 'pbe',
-                                     root = Path('/home/fes33/Documents/GIK - R&D/Personal - Papers and Reports/--Libraries/abinit/jhr/data/formation_energies')
+                                     root = Path('.')
                                      ):
 
         elem_file = root / elem / f"{elem}_{pseudo}.xml"
@@ -2422,3 +2432,97 @@ class RunParserEspresso():
 
         en_per_atom = energy/n_atoms
         return en_per_atom
+
+    @classmethod
+    def get_atomic_site_potentials(cls,
+            cube_file: VolumetricData,
+            beta: float = 1.5):
+
+        """Calculates atomic gaussian average site potential.
+
+           cube_file:  cube file for the potential
+
+           beta : Gaussian broadening factor at atomic sites (in bohr)
+
+           Returns:
+                dict with keys:
+                    atomic sites
+                    Positions
+                    site_potential
+        """
+        ang_to_bohr = 1.889726
+        nx, ny, nz = cube_file.data["total"].shape
+        lattice = cube_file.structure.lattice
+        # Define reciprocal lattice vectors
+        reci_latt = lattice.reciprocal_lattice
+        dgx = reci_latt.abc[0]
+        dgy = reci_latt.abc[1]
+        dgz = reci_latt.abc[2]
+        # convert to bohr to do calculation in atomic units
+        dgx /= ang_to_bohr
+        dgy /= ang_to_bohr
+        dgz /= ang_to_bohr
+
+        gx = np.roll(np.arange(-nx // 2, nx // 2, 1, dtype=int), int(nx // 2)) * dgx
+        gy = np.roll(np.arange(-ny // 2, ny // 2, 1, dtype=int), int(ny // 2)) * dgy
+        gz = np.roll(np.arange(-nz // 2, nz // 2, 1, dtype=int), int(nz // 2)) * dgz
+
+        Gx, Gy, Gz = np.meshgrid(gx, gy, gz, indexing="ij")
+        g2 = Gx ** 2 + Gy ** 2 + Gz ** 2
+
+        # gaussian averaging
+        gaussian = np.exp(-0.5 * beta ** 2 * g2)
+
+        pot = cube_file.data["total"]
+
+        # FFT to reciprocal space
+        v_G = np.fft.fftn(pot)
+
+        v_G *= gaussian
+
+        # Back to real space
+        v_R = np.real(np.fft.ifftn(v_G))
+
+        v_R *= -Ry_to_eV
+
+        # get potentials at atomic sites
+        v_R_atomic_sites = interpolate_potentials_at_atomic_sites(v_R, cube_file)
+
+        sites = cube_file.structure.sites
+        coords = np.array([site.coords for site in sites])
+
+        efnv_plot_data_dict = {"positions": [], "site_potentials": [], "atoms": []}
+
+        efnv_plot_data_dict["site_potentials"].extend(v_R_atomic_sites)
+        efnv_plot_data_dict["positions"].extend(coords)
+        efnv_plot_data_dict["atoms"].extend(site.specie.symbol for site in sites)
+
+        return efnv_plot_data_dict
+
+
+def interpolate_potentials_at_atomic_sites(
+    smoothed_potential: np.ndarray,
+    cube_data: VolumetricData,
+):
+    nx, ny, nz = cube_data.data["total"].shape
+
+    xpoints = np.linspace(0.0, 1.0, nx)
+    ypoints = np.linspace(0.0, 1.0, ny)
+    zpoints = np.linspace(0.0, 1.0, nz)
+
+
+    interpolator = RegularGridInterpolator(
+        (xpoints, ypoints, zpoints),
+        smoothed_potential,
+        bounds_error=True,
+    )
+
+    atomic_site_potentials = np.zeros(cube_data.structure.num_sites)
+
+    for i, site in enumerate(cube_data.structure):
+        frac = np.mod(site.frac_coords, 1.0)
+        frac = np.clip(frac, 0.0, 1.0 - 1e-12)
+        V = float(interpolator(frac))
+        atomic_site_potentials[i] = V
+
+    return atomic_site_potentials
