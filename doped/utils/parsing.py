@@ -2014,7 +2014,7 @@ from doped.utils.parsing import parse_projected_eigen, find_archived_fname
 from pymatgen.io.espresso.outputs.pwxml import PWxml
 from ase.io.cube import read_cube_data
 from scipy.ndimage import map_coordinates
-from pymatgen.io.common import VolumetricData
+from pymatgen.io.vasp import VolumetricData
 from pymatgen.core.units import Ry_to_eV
 BOHR_TO_ANGSTROM = 0.529177
 
@@ -2168,7 +2168,7 @@ class RunParserEspresso():
 
 
     @classmethod
-    def _get_bulk_cube_dict(cls, bulk_path, quiet=False):
+    def _get_cube_dict(cls, bulk_path, quiet=False):
 
         bulk_cube_path, multiple = _get_output_files_warn_if_multiple(filename, bulk_path, dir_type="bulk")
 
@@ -2264,12 +2264,20 @@ class RunParserEspresso():
 
         try:
             cube = VolumetricData.from_cube(cube_path)
+
         except FileNotFoundError:
             raise FileNotFoundError(
                 f"Cube file not found at {cube_path}(.gz/.xz/.bz/.lzma). Needed for calculating the "
                 f"Freysoldt (FNV) image charge correction!"
             ) from None
         return cube
+
+    def _get_bulk_cube_dict(bulk_path, quiet=False, filename=".cube"):
+        bulk_cube_path, multiple = _get_output_files_warn_if_multiple(filename, bulk_path, dir_type="bulk",
+                                                                        quiet=quiet)
+
+        bulk_cube = RunParser('espresso').get_cube(bulk_cube_path)
+        return {str(k): bulk_cube.get_average_along_axis(k) for k in [0, 1, 2]}
 
     # @classmethod
     # def potcar_spec_fix(cls, vasprun_obj):
@@ -2434,13 +2442,13 @@ class RunParserEspresso():
         return en_per_atom
 
     @classmethod
-    def get_atomic_site_potentials(cls,
-            cube_file: VolumetricData,
+    def _get_atomic_site_potentials(cls,
+            cube_path: PathLike,
             beta: float = 1.5):
 
         """Calculates atomic gaussian average site potential.
 
-           cube_file:  cube file for the potential
+           cube_path:  cube path for the potential
 
            beta : Gaussian broadening factor at atomic sites (in bohr)
 
@@ -2451,8 +2459,9 @@ class RunParserEspresso():
                     site_potential
         """
         ang_to_bohr = 1.889726
-        nx, ny, nz = cube_file.data["total"].shape
-        lattice = cube_file.structure.lattice
+        cube_data = VolumetricData.from_cube(cube_path)
+        nx, ny, nz = cube_data.data["total"].shape
+        lattice = cube_data.structure.lattice
         # Define reciprocal lattice vectors
         reci_latt = lattice.reciprocal_lattice
         dgx = reci_latt.abc[0]
@@ -2473,7 +2482,7 @@ class RunParserEspresso():
         # gaussian averaging
         gaussian = np.exp(-0.5 * beta ** 2 * g2)
 
-        pot = cube_file.data["total"]
+        pot = cube_data.data["total"]
 
         # FFT to reciprocal space
         v_G = np.fft.fftn(pot)
@@ -2486,10 +2495,13 @@ class RunParserEspresso():
         v_R *= -Ry_to_eV
 
         # get potentials at atomic sites
-        v_R_atomic_sites = interpolate_potentials_at_atomic_sites(v_R, cube_file)
+        v_R_atomic_sites = interpolate_potentials_at_atomic_sites(v_R, cube_data)
 
-        sites = cube_file.structure.sites
+        sites = cube_data.structure.sites
         coords = np.array([site.coords for site in sites])
+
+        #TODO: Implement atom based averaging rather than ubiquitous averaging of the potential
+
 
         efnv_plot_data_dict = {"positions": [], "site_potentials": [], "atoms": []}
 

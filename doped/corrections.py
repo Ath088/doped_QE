@@ -50,10 +50,11 @@ from monty.json import MontyDecoder
 from pymatgen.analysis.defects.corrections import freysoldt
 from pymatgen.analysis.defects.utils import CorrectionResult
 from pymatgen.core.periodic_table import Element
+from pymatgen.io.vasp import VolumetricData
 from pymatgen.io.vasp.outputs import Locpot, Outcar
 from pymatgen.util.typing import PathLike
 
-from doped.analysis import _convert_dielectric_to_tensor
+from doped.analysis import _convert_dielectric_to_tensor, _get_output_files_and_check_if_multiple
 from doped.utils.parsing import (
     _get_bulk_supercell,
     _get_core_potentials_from_outcar_obj,
@@ -62,6 +63,7 @@ from doped.utils.parsing import (
     get_core_potentials_from_outcar,
     get_locpot,
     get_wigner_seitz_radius,
+    RunParser
 )
 from doped.utils.plotting import _get_backend, format_defect_name
 
@@ -105,37 +107,46 @@ def _get_and_check_metadata(entry, key, display_name):
 
 
 def _check_if_pathlike_and_get_locpot_or_core_pots(
-    locpot_or_outcar: Locpot | Outcar | PathLike | dict,
+    locpot_or_outcar_or_cube: Locpot | Outcar | PathLike | VolumetricData | dict,
     obj_type: str = "locpot",
     dir_type: str = "",
     total_energy: list | float | None = None,
 ):
-    if isinstance(locpot_or_outcar, PathLike):
+    if isinstance(locpot_or_outcar_or_cube, PathLike):
         if obj_type == "locpot":
-            return get_locpot(locpot_or_outcar)
-        return get_core_potentials_from_outcar(  # otherwise OUTCAR
-            locpot_or_outcar, dir_type=dir_type, total_energy=total_energy
-        )
+            return get_locpot(locpot_or_outcar_or_cube)
 
-    if isinstance(locpot_or_outcar, Outcar):
+        elif obj_type == "cube":
+            return RunParser('espresso').get_cube(locpot_or_outcar_or_cube)
+
+        else:
+            return get_core_potentials_from_outcar(  # otherwise OUTCAR
+                locpot_or_outcar_or_cube, dir_type=dir_type, total_energy=total_energy
+            )
+
+    if isinstance(locpot_or_outcar_or_cube, Outcar):
         return _get_core_potentials_from_outcar_obj(
-            locpot_or_outcar, dir_type=dir_type, total_energy=total_energy
+            locpot_or_outcar_or_cube, dir_type=dir_type, total_energy=total_energy
         )
 
-    if not isinstance(locpot_or_outcar, Locpot | Outcar | dict):
+    if isinstance(locpot_or_outcar_or_cube, VolumetricData):
+        return RunParser('espresso')._get_atomic_site_potentials(locpot_or_outcar_or_cube)
+
+
+    if not isinstance(locpot_or_outcar_or_cube, Locpot | Outcar | VolumetricData | dict):
         raise TypeError(
             f"`{obj_type}` input must be either a path to a {obj_type.upper()} file or a pymatgen "
-            f"{obj_type.upper()[0]+obj_type[1:]} object, but got {type(locpot_or_outcar)} instead."
+            f"{obj_type.upper()[0]+obj_type[1:]} object, but got {type(locpot_or_outcar_or_cube)} instead."
         )
 
-    return locpot_or_outcar
+    return locpot_or_outcar_or_cube
 
 
 def get_freysoldt_correction(
     defect_entry,
     dielectric: float | np.ndarray | list | None = None,
-    defect_locpot: PathLike | Locpot | dict | None = None,
-    bulk_locpot: PathLike | Locpot | dict | None = None,
+    defect_locpot: PathLike | Locpot | dict | VolumetricData| None = None,
+    bulk_locpot: PathLike | Locpot | dict | VolumetricData| None = None,
     plot: bool = False,
     filename: PathLike | None = None,
     axis: int | None = None,
@@ -220,13 +231,25 @@ def get_freysoldt_correction(
         dielectric = _get_and_check_metadata(defect_entry, "dielectric", "Dielectric constant")
     dielectric = _convert_dielectric_to_tensor(dielectric)
 
-    defect_locpot = defect_locpot or _get_and_check_metadata(
-        defect_entry, "defect_locpot_dict", "Defect LOCPOT"
-    )
-    bulk_locpot = bulk_locpot or _get_and_check_metadata(defect_entry, "bulk_locpot_dict", "Bulk LOCPOT")
+    #defect_locpot = defect_locpot or _get_and_check_metadata(
+    #    defect_entry, "defect_locpot_dict", "Defect LOCPOT"
+    #)
+    #bulk_locpot = bulk_locpot or _get_and_check_metadata(defect_entry, "bulk_locpot_dict", "Bulk LOCPOT")
 
-    defect_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(defect_locpot, obj_type="locpot")
-    bulk_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(bulk_locpot, obj_type="locpot")
+    #defect_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(defect_locpot, obj_type="locpot")
+    #bulk_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(bulk_locpot, obj_type="locpot")
+
+    defect_cube_path, multiple = _get_output_files_and_check_if_multiple('.cube',
+                                                                         defect_entry.calculation_metadata[
+                                                                             "defect_path"],
+                                                                         )
+
+    bulk_cube_path, multiple = _get_output_files_and_check_if_multiple('.cube',
+                                                                         defect_entry.calculation_metadata[
+                                                                             "bulk_path"],
+                                                                         )
+    defect_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(defect_cube_path, obj_type="cube")
+    bulk_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(bulk_cube_path, obj_type="cube")
 
     fnv_correction = freysoldt.get_freysoldt_correction(
         q=defect_entry.charge_state,
