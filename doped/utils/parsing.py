@@ -2480,7 +2480,7 @@ class RunParserEspresso():
         g2 = Gx ** 2 + Gy ** 2 + Gz ** 2
 
         # gaussian averaging
-        gaussian = np.exp(-0.5 * beta ** 2 * g2)
+        gaussian = np.exp(-0.5 * (beta ** 2)* g2)
 
         pot = cube_data.data["total"]
 
@@ -2502,7 +2502,6 @@ class RunParserEspresso():
 
         #TODO: Implement atom based averaging rather than ubiquitous averaging of the potential
 
-
         efnv_plot_data_dict = {"positions": [], "site_potentials": [], "atoms": []}
 
         efnv_plot_data_dict["site_potentials"].extend(v_R_atomic_sites)
@@ -2518,14 +2517,17 @@ def interpolate_potentials_at_atomic_sites(
 ):
     nx, ny, nz = cube_data.data["total"].shape
 
-    xpoints = np.linspace(0.0, 1.0, nx)
-    ypoints = np.linspace(0.0, 1.0, ny)
-    zpoints = np.linspace(0.0, 1.0, nz)
+    xpoints = np.linspace(0.0, 1.0, nx, endpoint=False)
+    ypoints = np.linspace(0.0, 1.0, ny, endpoint=False)
+    zpoints = np.linspace(0.0, 1.0, nz, endpoint=False)
 
+
+    x_max, y_max, z_max = xpoints[-1], ypoints[-1], zpoints[-1]
 
     interpolator = RegularGridInterpolator(
         (xpoints, ypoints, zpoints),
         smoothed_potential,
+        method='linear',
         bounds_error=True,
     )
 
@@ -2533,8 +2535,9 @@ def interpolate_potentials_at_atomic_sites(
 
     for i, site in enumerate(cube_data.structure):
         frac = np.mod(site.frac_coords, 1.0)
-        frac = np.clip(frac, 0.0, 1.0 - 1e-12)
-        V = float(interpolator(frac))
-        atomic_site_potentials[i] = V
+        frac[0] = np.clip(frac[0], 0.0, x_max)
+        frac[1] = np.clip(frac[1], 0.0, y_max)
+        frac[2] = np.clip(frac[2], 0.0, z_max)
+        atomic_site_potentials[i] = float(interpolator([frac]))
 
     return atomic_site_potentials

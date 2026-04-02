@@ -3337,6 +3337,7 @@ class DefectParserEspresso:
         parse_projected_eigen: bool | None = None,
         filename = 'espresso.xml',
         occu_tol: float = 1e-8,
+        beta: float = 1.5,
         pp_folder: PathLike = None,
         **kwargs,
     ):
@@ -3447,6 +3448,7 @@ class DefectParserEspresso:
                 multiplicities / unrelaxed site symmetries), while an input
                 ``symprec`` value will be used for determining `relaxed` site
                 symmetries.
+                beta: broadening factor for calculations
 
         Return:
             ``DefectParser`` object.
@@ -3499,11 +3501,11 @@ class DefectParserEspresso:
             )                                         # set equal to folder name
             if "espresso" in possible_defect_name:  # get parent directory name:
                 possible_defect_name = os.path.basename(os.path.dirname(defect_path))
-            #TODO: Correct the issues below
-            #try: (This method fails to return charge states, instead gives zero charge, vasprun possibly cannot read charges from PWxml)
-             #   parsed_charge_state: int = total_charge_from_vasprun(vasprun= defect_vr, code = 'espresso', pp_folder = pp_folder)
 
-            #except RuntimeError as orig_exc:  # auto charge guessing failed and charge_state not provided,
+            try:
+                parsed_charge_state: int = defect_vr.total_charge
+
+            except RuntimeError as orig_exc:  # auto charge guessing failed and charge_state not provided,
                 # try to determine from folder name -- must have "-" or "+" at end of name for this
                 try:
                     charge_state_suffix = possible_defect_name.rsplit("_", 1)[-1]
@@ -3732,7 +3734,7 @@ class DefectParserEspresso:
 
         if not skip_corrections and defect_entry.charge_state != 0:
                 # no finite-size charge corrections by default for neutral defects
-            skip_corrections = dp._check_and_load_appropriate_charge_correction()
+            skip_corrections = dp._check_and_load_appropriate_charge_correction(beta)
 
         if not skip_corrections and defect_entry.charge_state != 0:
             try:
@@ -3772,7 +3774,7 @@ class DefectParserEspresso:
                #         )
         return dp
 
-    def _check_and_load_appropriate_charge_correction(self):
+    def _check_and_load_appropriate_charge_correction(self, beta: float = 1.5):
         skip_corrections = False
         bulk_path = self.defect_entry.calculation_metadata["bulk_path"]
         defect_path = self.defect_entry.calculation_metadata["defect_path"]
@@ -3786,7 +3788,7 @@ class DefectParserEspresso:
 
         if have_cube_files:
             try:
-                self.load_eFNV_data()
+                self.load_eFNV_data(beta = beta)
             except Exception as kumagai_exc:
                 if have_cube_files:
                     try:
@@ -3889,7 +3891,7 @@ class DefectParserEspresso:
 
         return bulk_locpot_dict
 
-    def load_eFNV_data(self, bulk_site_potentials: list | None = None):
+    def load_eFNV_data(self, bulk_site_potentials: list | None = None, beta: float = 1.5):
         """
         Load metadata required for performing Kumagai correction (i.e. atomic
         site potentials from the ``OUTCAR`` files).
@@ -3923,12 +3925,12 @@ class DefectParserEspresso:
         if bulk_site_potentials is None:
             bulk_path = self.defect_entry.calculation_metadata["bulk_path"]
             bulk_cube_path, multiple = _get_output_files_and_check_if_multiple(".cube", bulk_path)
-            bulk_site_potentials_dict = RunParser(self.code)._get_atomic_site_potentials(bulk_cube_path)
+            bulk_site_potentials_dict = RunParser(self.code)._get_atomic_site_potentials(bulk_cube_path, beta = beta)
             bulk_site_potentials = np.array(bulk_site_potentials_dict["site_potentials"])
 
         defect_path = self.defect_entry.calculation_metadata["defect_path"]
         defect_cube_path, multiple = _get_output_files_and_check_if_multiple(".cube", defect_path)
-        defect_site_potentials_dict = RunParser(self.code)._get_atomic_site_potentials(defect_cube_path)
+        defect_site_potentials_dict = RunParser(self.code)._get_atomic_site_potentials(defect_cube_path,  beta = beta)
         defect_site_potentials = np.array(defect_site_potentials_dict["site_potentials"])
 
         self.defect_entry.calculation_metadata.update(
@@ -4583,6 +4585,7 @@ class DefectsParserEspresso(DefectsParserVasp):
         json_filename: PathLike | bool | None = None,
         parse_projected_eigen: bool | None = None,
         occu_tol: float = 1e-8,
+        beta: float = 1.5,
         pp_folder: PathLike | None = None,
         **kwargs,
 
@@ -4594,6 +4597,7 @@ class DefectsParserEspresso(DefectsParserVasp):
         self.bulk_path = bulk_path
         self.subfolder = subfolder
         self.pp_folder = pp_folder
+        self.beta = beta
         #--implement for espresso??? Use as_dict method from VaspRun and PWXml
         if bulk_band_gap_vr and not isinstance(bulk_band_gap_vr, Vasprun):
             #self.bulk_band_gap_vr = get_vasprun(bulk_band_gap_vr, parse_projected_eigen=False)
@@ -4648,7 +4652,7 @@ class DefectsParserEspresso(DefectsParserVasp):
             "bulk_site_potentials": None,
         }
 
-        parsed_defect_entries, parsing_warnings = self._parse_defect_folders_and_warnings()
+        parsed_defect_entries, parsing_warnings = self._parse_defect_folders_and_warnings(self.beta)
 
         self.defect_dict = self._warn_remove_duplicate_parsed_defect_entries(parsed_defect_entries)
 
@@ -4931,8 +4935,8 @@ class DefectsParserEspresso(DefectsParserVasp):
         self.defect_dict = sort_defect_entries(self.defect_dict)  # type: ignore
         return self.defect_dict
 
-    def _parse_defect_folders_and_warnings(self):
-        parsed_defect_entries, parsing_warnings = self._parse_defect_folders()
+    def _parse_defect_folders_and_warnings(self, beta):
+        parsed_defect_entries, parsing_warnings = self._parse_defect_folders(beta)
 
         parsing_warnings = self._process_parsing_warnings(parsing_warnings)
 
@@ -5051,7 +5055,7 @@ class DefectsParserEspresso(DefectsParserVasp):
 
         return new_parsing_warnings
 
-    def _parse_defect_folders(self):
+    def _parse_defect_folders(self, beta):
         """
         Parse defect calculation folders (serially or multily), depending on CPU cores available.
         """
@@ -5107,7 +5111,7 @@ class DefectsParserEspresso(DefectsParserVasp):
                                 self.bulk_corrections_data[k] = RunParser('espresso')._get_bulk_locpot_dict(self.bulk_path, quiet=True)
                             elif k == "bulk_site_potentials":
                                 bulk_cube_path, _ = _get_output_files_warn_if_multiple("cube", self.bulk_path)
-                                self.bulk_corrections_data[k] = RunParser(self.code)._get_atomic_site_potentials(cube_path = bulk_cube_path)
+                                self.bulk_corrections_data[k] = RunParser(self.code)._get_atomic_site_potentials(cube_path = bulk_cube_path, beta= beta)
 
 
                 # Parallel processing of remaining folders
@@ -5194,6 +5198,7 @@ class DefectsParserEspresso(DefectsParserVasp):
                 parse_projected_eigen=self.parse_projected_eigen,
                 filename = filename,
                 pp_folder = self.pp_folder,
+                beta = self.beta,
                 **self.kwargs
             )
             if dp.skip_corrections and dp.defect_entry.charge_state != 0 and self.dielectric is None:
