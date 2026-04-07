@@ -2533,6 +2533,6 @@ def interpolate_potentials_at_atomic_sites(
         frac[0] = np.clip(frac[0], 0.0, x_max)
         frac[1] = np.clip(frac[1], 0.0, y_max)
         frac[2] = np.clip(frac[2], 0.0, z_max)
-        atomic_site_potentials[i] = float(interpolator([frac]))
+        atomic_site_potentials[i] = float(interpolator([frac])[0])
 
     return atomic_site_potentials
