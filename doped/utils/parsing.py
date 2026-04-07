@@ -2462,12 +2462,12 @@ class RunParserEspresso():
         cube_data = VolumetricData.from_cube(cube_path)
         nx, ny, nz = cube_data.data["total"].shape
         lattice = cube_data.structure.lattice
-        # Define reciprocal lattice vectors
+
         reci_latt = lattice.reciprocal_lattice
         dgx = reci_latt.abc[0]
         dgy = reci_latt.abc[1]
         dgz = reci_latt.abc[2]
-        # convert to bohr to do calculation in atomic units
+
         dgx /= ang_to_bohr
         dgy /= ang_to_bohr
         dgz /= ang_to_bohr
@@ -2484,23 +2484,18 @@ class RunParserEspresso():
 
         pot = cube_data.data["total"]
 
-        # FFT to reciprocal space
         v_G = np.fft.fftn(pot)
 
         v_G *= gaussian
 
-        # Back to real space
         v_R = np.real(np.fft.ifftn(v_G))
 
         v_R *= -Ry_to_eV
 
-        # get potentials at atomic sites
         v_R_atomic_sites = interpolate_potentials_at_atomic_sites(v_R, cube_data)
 
         sites = cube_data.structure.sites
         coords = np.array([site.coords for site in sites])
-
-        #TODO: Implement atom based averaging rather than ubiquitous averaging of the potential
 
         efnv_plot_data_dict = {"positions": [], "site_potentials": [], "atoms": []}
 
