@@ -2478,12 +2478,24 @@ class RunParserEspresso:
         lattice = cube_data.structure.lattice
 
         reci_latt = lattice.reciprocal_lattice
-        gx = np.roll(np.arange(-nx // 2, nx // 2, 1, dtype=int), int(nx // 2)) * reci_latt.abc[0]
-        gy = np.roll(np.arange(-ny // 2, ny // 2, 1, dtype=int), int(ny // 2)) * reci_latt.abc[1]
-        gz = np.roll(np.arange(-nz // 2, nz // 2, 1, dtype=int), int(nz // 2)) * reci_latt.abc[2]
+        # integer Miller indices along each reciprocal axis, FFT-ordered:
+        nx_idx = np.roll(np.arange(-nx // 2, nx // 2, 1, dtype=int), int(nx // 2))
+        ny_idx = np.roll(np.arange(-ny // 2, ny // 2, 1, dtype=int), int(ny // 2))
+        nz_idx = np.roll(np.arange(-nz // 2, nz // 2, 1, dtype=int), int(nz // 2))
 
-        Gx, Gy, Gz = np.meshgrid(gx, gy, gz, indexing="ij")
-        g2 = Gx**2 + Gy**2 + Gz**2
+        Nx, Ny, Nz = np.meshgrid(nx_idx, ny_idx, nz_idx, indexing="ij")
+        # G = n1*b1 + n2*b2 + n3*b3; compute |G|^2 using the reciprocal metric tensor to correctly handle
+        # non-orthorhombic cells:
+        recip_matrix = reci_latt.matrix  # rows are b1, b2, b3
+        metric = recip_matrix @ recip_matrix.T  # G_ij = bi . bj
+        g2 = (
+            Nx**2 * metric[0, 0]
+            + Ny**2 * metric[1, 1]
+            + Nz**2 * metric[2, 2]
+            + 2 * Nx * Ny * metric[0, 1]
+            + 2 * Nx * Nz * metric[0, 2]
+            + 2 * Ny * Nz * metric[1, 2]
+        )
 
         pot = cube_data.data["total"] * -Ry_to_eV
         v_G = np.fft.fftn(pot)
