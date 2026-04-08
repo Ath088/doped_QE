@@ -4295,12 +4295,12 @@ class DefectParserEspresso:
             self.defect_entry.calculation_metadata.get("bulk_site_potentials", None) is not None
             and self.defect_entry.calculation_metadata.get("defect_site_potentials", None) is not None
         ):
-            self.defect_entry.get_kumagai_correction(verbose=True, error_tolerance=self.error_tolerance)
+            self.defect_entry.get_kumagai_correction(verbose=False, error_tolerance=self.error_tolerance)
 
         elif self.defect_entry.calculation_metadata.get(
             "bulk_locpot_dict"
         ) and self.defect_entry.calculation_metadata.get("defect_locpot_dict"):
-            self.defect_entry.get_freysoldt_correction(verbose=True, error_tolerance=self.error_tolerance)
+            self.defect_entry.get_freysoldt_correction(verbose=False, error_tolerance=self.error_tolerance)
 
         else:
             raise ValueError(
