@@ -56,6 +56,7 @@ from pymatgen.util.typing import PathLike
 
 from doped.analysis import _convert_dielectric_to_tensor, _get_output_files_and_check_if_multiple
 from doped.utils.parsing import (
+    RunParser,
     _get_bulk_supercell,
     _get_core_potentials_from_outcar_obj,
     _get_defect_supercell,
@@ -63,7 +64,6 @@ from doped.utils.parsing import (
     get_core_potentials_from_outcar,
     get_locpot,
     get_wigner_seitz_radius,
-    RunParser
 )
 from doped.utils.plotting import _get_backend, format_defect_name
 
@@ -117,7 +117,7 @@ def _check_if_pathlike_and_get_locpot_or_core_pots(
             return get_locpot(locpot_or_outcar_or_cube)
 
         elif obj_type == "cube":
-            return RunParser('espresso').get_cube(locpot_or_outcar_or_cube)
+            return RunParser("espresso").get_cube(locpot_or_outcar_or_cube)
 
         else:
             return get_core_potentials_from_outcar(  # otherwise OUTCAR
@@ -130,8 +130,7 @@ def _check_if_pathlike_and_get_locpot_or_core_pots(
         )
 
     if isinstance(locpot_or_outcar_or_cube, VolumetricData):
-        return RunParser('espresso')._get_atomic_site_potentials(locpot_or_outcar_or_cube)
-
+        return RunParser("espresso")._get_atomic_site_potentials(locpot_or_outcar_or_cube)
 
     if not isinstance(locpot_or_outcar_or_cube, Locpot | Outcar | VolumetricData | dict):
         raise TypeError(
@@ -145,8 +144,8 @@ def _check_if_pathlike_and_get_locpot_or_core_pots(
 def get_freysoldt_correction(
     defect_entry,
     dielectric: float | np.ndarray | list | None = None,
-    defect_locpot: PathLike | Locpot | dict | VolumetricData| None = None,
-    bulk_locpot: PathLike | Locpot | dict | VolumetricData| None = None,
+    defect_locpot: PathLike | Locpot | dict | VolumetricData | None = None,
+    bulk_locpot: PathLike | Locpot | dict | VolumetricData | None = None,
     plot: bool = False,
     filename: PathLike | None = None,
     axis: int | None = None,
@@ -231,23 +230,23 @@ def get_freysoldt_correction(
         dielectric = _get_and_check_metadata(defect_entry, "dielectric", "Dielectric constant")
     dielectric = _convert_dielectric_to_tensor(dielectric)
 
-    #defect_locpot = defect_locpot or _get_and_check_metadata(
+    # defect_locpot = defect_locpot or _get_and_check_metadata(
     #    defect_entry, "defect_locpot_dict", "Defect LOCPOT"
-    #)
-    #bulk_locpot = bulk_locpot or _get_and_check_metadata(defect_entry, "bulk_locpot_dict", "Bulk LOCPOT")
+    # )
+    # bulk_locpot = bulk_locpot or _get_and_check_metadata(defect_entry, "bulk_locpot_dict", "Bulk LOCPOT")
 
-    #defect_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(defect_locpot, obj_type="locpot")
-    #bulk_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(bulk_locpot, obj_type="locpot")
+    # defect_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(defect_locpot, obj_type="locpot")
+    # bulk_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(bulk_locpot, obj_type="locpot")
 
-    defect_cube_path, multiple = _get_output_files_and_check_if_multiple('.cube',
-                                                                         defect_entry.calculation_metadata[
-                                                                             "defect_path"],
-                                                                         )
+    defect_cube_path, multiple = _get_output_files_and_check_if_multiple(
+        ".cube",
+        defect_entry.calculation_metadata["defect_path"],
+    )
 
-    bulk_cube_path, multiple = _get_output_files_and_check_if_multiple('.cube',
-                                                                         defect_entry.calculation_metadata[
-                                                                             "bulk_path"],
-                                                                         )
+    bulk_cube_path, multiple = _get_output_files_and_check_if_multiple(
+        ".cube",
+        defect_entry.calculation_metadata["bulk_path"],
+    )
     defect_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(defect_cube_path, obj_type="cube")
     bulk_locpot = _check_if_pathlike_and_get_locpot_or_core_pots(bulk_cube_path, obj_type="cube")
 
@@ -504,11 +503,6 @@ def get_kumagai_correction(
         """
         if calc_results.structure.lattice != perfect_calc_results.structure.lattice:
             raise SupercellError("The lattice constants for defect and perfect models are different")
-        structure_analyzer = DefectStructureComparator(
-            calc_results.structure, perfect_calc_results.structure
-        )
-        if defect_coords is None:
-            defect_coords = structure_analyzer.defect_center_coord
         lattice = calc_results.structure.lattice
         sites, rel_coords = [], []
 
