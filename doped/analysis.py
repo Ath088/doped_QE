@@ -5347,6 +5347,7 @@ from pymatgen.util.typing import PathLike
 from doped.utils.parsing import find_archived_fname
 
 
+# TODO: This is duplicated in doped.utils.parsing.py?? Code below isn't used?
 class RunParserEspresso:
     @classmethod
     def get_run(cls, espressorun_path: PathLike, parse_mag: bool = False, **kwargs):
