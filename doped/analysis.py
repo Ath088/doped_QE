@@ -3351,7 +3351,7 @@ class DefectParserEspresso:
         parse_projected_eigen: bool | None = None,
         filename="espresso.xml",
         occu_tol: float = 1e-8,
-        beta: float = 1.5,
+        beta: float = 0.5,
         pp_folder: PathLike = None,
         **kwargs,
     ):
@@ -3797,7 +3797,7 @@ class DefectParserEspresso:
             #         )
         return dp
 
-    def _check_and_load_appropriate_charge_correction(self, beta: float = 1.5):
+    def _check_and_load_appropriate_charge_correction(self, beta: float = 0.5):
         skip_corrections = False
         bulk_path = self.defect_entry.calculation_metadata["bulk_path"]
         defect_path = self.defect_entry.calculation_metadata["defect_path"]
@@ -3911,7 +3911,7 @@ class DefectParserEspresso:
 
         return bulk_locpot_dict
 
-    def load_eFNV_data(self, bulk_site_potentials: list | None = None, beta: float = 1.5):
+    def load_eFNV_data(self, bulk_site_potentials: list | None = None, beta: float = 0.5):
         """
         Load metadata required for performing Kumagai correction (i.e. atomic
         site potentials from the ``OUTCAR`` files).
@@ -4634,7 +4634,7 @@ class DefectsParserEspresso(DefectsParserVasp):
         json_filename: PathLike | bool | None = None,
         parse_projected_eigen: bool | None = None,
         occu_tol: float = 1e-8,
-        beta: float = 1.5,
+        beta: float = 0.5,
         pp_folder: PathLike | None = None,
         **kwargs,
     ):

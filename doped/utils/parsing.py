@@ -2459,7 +2459,7 @@ class RunParserEspresso:
         return en_per_atom
 
     @classmethod
-    def _get_atomic_site_potentials(cls, cube_path: PathLike, beta: float = 1.5):
+    def _get_atomic_site_potentials(cls, cube_path: PathLike, beta: float = 0.5):
         """
         Calculates atomic gaussian average site potential.
 
