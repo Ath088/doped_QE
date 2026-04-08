@@ -2442,55 +2442,36 @@ class RunParserEspresso():
         return en_per_atom
 
     @classmethod
-    def _get_atomic_site_potentials(cls,
-            cube_path: PathLike,
-            beta: float = 1.5):
-
+    def _get_atomic_site_potentials(cls, cube_path: PathLike, beta: float = 1.5):
         """Calculates atomic gaussian average site potential.
 
-           cube_path:  cube path for the potential
+        cube_path:  cube path for the potential
 
-           beta : Gaussian broadening factor at atomic sites (in bohr)
+        beta : Gaussian broadening factor at atomic sites (in bohr)
 
-           Returns:
-                dict with keys:
-                    atomic sites
-                    Positions
-                    site_potential
+        Returns:
+             dict with keys:
+                 atomic sites
+                 Positions
+                 site_potential
         """
-        ang_to_bohr = 1.889726
         cube_data = VolumetricData.from_cube(cube_path)
         nx, ny, nz = cube_data.data["total"].shape
         lattice = cube_data.structure.lattice
 
         reci_latt = lattice.reciprocal_lattice
-        dgx = reci_latt.abc[0]
-        dgy = reci_latt.abc[1]
-        dgz = reci_latt.abc[2]
-
-        dgx /= ang_to_bohr
-        dgy /= ang_to_bohr
-        dgz /= ang_to_bohr
-
-        gx = np.roll(np.arange(-nx // 2, nx // 2, 1, dtype=int), int(nx // 2)) * dgx
-        gy = np.roll(np.arange(-ny // 2, ny // 2, 1, dtype=int), int(ny // 2)) * dgy
-        gz = np.roll(np.arange(-nz // 2, nz // 2, 1, dtype=int), int(nz // 2)) * dgz
+        gx = np.roll(np.arange(-nx // 2, nx // 2, 1, dtype=int), int(nx // 2)) * reci_latt.abc[0]
+        gy = np.roll(np.arange(-ny // 2, ny // 2, 1, dtype=int), int(ny // 2)) * reci_latt.abc[1]
+        gz = np.roll(np.arange(-nz // 2, nz // 2, 1, dtype=int), int(nz // 2)) * reci_latt.abc[2]
 
         Gx, Gy, Gz = np.meshgrid(gx, gy, gz, indexing="ij")
-        g2 = Gx ** 2 + Gy ** 2 + Gz ** 2
+        g2 = Gx**2 + Gy**2 + Gz**2
 
-        # gaussian averaging
-        gaussian = np.exp(-0.5 * (beta ** 2)* g2)
-
-        pot = cube_data.data["total"]
-
+        pot = cube_data.data["total"] * -Ry_to_eV
         v_G = np.fft.fftn(pot)
-
-        v_G *= gaussian
-
+        beta_angstrom = beta * BOHR_TO_ANGSTROM  # TODO: Just use beta in units of Angstrom later?
+        v_G *= np.exp(-0.5 * (beta_angstrom**2) * g2)  # Gaussian broadening in reciprocal space
         v_R = np.real(np.fft.ifftn(v_G))
-
-        v_R *= -Ry_to_eV
 
         v_R_atomic_sites = interpolate_potentials_at_atomic_sites(v_R, cube_data)
 
