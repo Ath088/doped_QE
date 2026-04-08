@@ -2516,23 +2516,21 @@ def interpolate_potentials_at_atomic_sites(
     ypoints = np.linspace(0.0, 1.0, ny, endpoint=False)
     zpoints = np.linspace(0.0, 1.0, nz, endpoint=False)
 
-
     x_max, y_max, z_max = xpoints[-1], ypoints[-1], zpoints[-1]
 
+    # TODO: Will want to revisit this implementation. Currently quite slow --
+    #  check if we can switch back to using `linear` interpolation when other
+    #  site potential parsing/averaging issues are sorted
     interpolator = RegularGridInterpolator(
         (xpoints, ypoints, zpoints),
         smoothed_potential,
-        method='linear',
+        method="cubic",  # 'linear' is faster, but 'cubic' is more accurate for interpolation
         bounds_error=True,
     )
 
-    atomic_site_potentials = np.zeros(cube_data.structure.num_sites)
+    frac_coords = np.mod(cube_data.structure.frac_coords, 1.0)
+    frac_coords = np.clip(
+        frac_coords, [0.0, 0.0, 0.0], [x_max, y_max, z_max]
+    )  # clip to within the (interpolation) grid
 
-    for i, site in enumerate(cube_data.structure):
-        frac = np.mod(site.frac_coords, 1.0)
-        frac[0] = np.clip(frac[0], 0.0, x_max)
-        frac[1] = np.clip(frac[1], 0.0, y_max)
-        frac[2] = np.clip(frac[2], 0.0, z_max)
-        atomic_site_potentials[i] = float(interpolator([frac])[0])
-
-    return atomic_site_potentials
+    return interpolator(frac_coords)
