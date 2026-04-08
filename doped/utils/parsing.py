@@ -2515,21 +2515,25 @@ def interpolate_potentials_at_atomic_sites(
     ypoints = np.linspace(0.0, 1.0, ny, endpoint=False)
     zpoints = np.linspace(0.0, 1.0, nz, endpoint=False)
 
-    x_max, y_max, z_max = xpoints[-1], ypoints[-1], zpoints[-1]
+    # pad the grid with periodic images so (cubic) interpolation works at cell boundaries:
+    xpoints_padded = np.concatenate([xpoints[-1:] - 1.0, xpoints, xpoints[:1] + 1.0])
+    ypoints_padded = np.concatenate([ypoints[-1:] - 1.0, ypoints, ypoints[:1] + 1.0])
+    zpoints_padded = np.concatenate([zpoints[-1:] - 1.0, zpoints, zpoints[:1] + 1.0])
 
-    # TODO: Will want to revisit this implementation. Currently quite slow --
-    #  check if we can switch back to using `linear` interpolation when other
-    #  site potential parsing/averaging issues are sorted
+    padded = np.concatenate(
+        [smoothed_potential[-1:, :, :], smoothed_potential, smoothed_potential[:1, :, :]], axis=0
+    )
+    padded = np.concatenate([padded[:, -1:, :], padded, padded[:, :1, :]], axis=1)
+    padded = np.concatenate([padded[:, :, -1:], padded, padded[:, :, :1]], axis=2)
+
+    # TODO: Will want to revisit this implementation; currently quite slow with cubic interpolation, but
+    # dropping to linear significantly worsens accuracy...
     interpolator = RegularGridInterpolator(
-        (xpoints, ypoints, zpoints),
-        smoothed_potential,
+        (xpoints_padded, ypoints_padded, zpoints_padded),
+        padded,
         method="cubic",  # 'linear' is faster, but 'cubic' is more accurate for interpolation
         bounds_error=True,
     )
-
     frac_coords = np.mod(cube_data.structure.frac_coords, 1.0)
-    frac_coords = np.clip(
-        frac_coords, [0.0, 0.0, 0.0], [x_max, y_max, z_max]
-    )  # clip to within the (interpolation) grid
 
     return interpolator(frac_coords)
