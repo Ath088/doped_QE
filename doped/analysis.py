@@ -796,6 +796,9 @@ class DefectsParser:
     (DefectsParserVasp etc.)
     """
 
+    # TODO: Will want ``code`` to be an optional argument, where it is intelligently automatically
+    # determined from the file types/names present.
+
     def __new__(cls, code: Literal["vasp", "espresso"], **kwargs):
         code = code.lower()
         if code == "vasp":
