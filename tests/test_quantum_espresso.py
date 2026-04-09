@@ -4,13 +4,13 @@ Tests for Quantum Espresso (QE) defect parsing and charge corrections using
 """
 
 # TODO: Change beta to Angstrom
-# TODO: Add one sxd beta=3 test
 # TODO: Some significant duplicate code here, get Claude to reduce
 # TODO: Cube files take up significant space, like LOCPOTs; should compress with gzip and ensure
 #  parseable like this
 
 import os
 import unittest
+from copy import deepcopy
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -21,6 +21,7 @@ from test_analysis import _create_dp_and_capture_warnings, check_DefectsParser
 from test_utils import EXAMPLE_DIR, custom_mpl_image_compare, if_present_rm
 
 from doped.corrections import get_kumagai_correction
+from doped.utils.parsing import RunParser
 
 mpl.use("Agg")  # don't show interactive plots if testing from CLI locally
 
@@ -679,6 +680,9 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
         cls.MgO_VASP_DIR = os.path.join(EXAMPLE_DIR, "MgO/Defects/Pre_Calculated_Results")
         cls.MgO_VASP_ENCUT400_DIR = os.path.join(EXAMPLE_DIR, "MgO/ENCUT_400_Defects")
         cls.MgO_QE_sxd_dir = os.path.join(cls.MgO_QE_DIR, "sxdefectalign")
+        cls.pp_folder = os.path.join(EXAMPLE_DIR, "pp_folder")
+        cls.bulk_path = os.path.join(cls.MgO_QE_DIR, "MgO_bulk")
+        cls.qe_defect_entry_beta_3 = None
 
         cls.qe_defect_dict = loadfn(os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict.json.gz"))
         cls.qe_defect_dict_beta_1_2 = loadfn(
@@ -691,6 +695,24 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
 
     def tearDown(self):
         plt.close("all")
+
+    @classmethod
+    def _get_qe_beta_3_entry(cls):
+        if cls.qe_defect_entry_beta_3 is None:
+            cls.qe_defect_entry_beta_3 = deepcopy(cls.qe_defect_dict["Mg_O_+1"])
+            bulk_cube_path = os.path.join(cls.bulk_path, "espresso_std", "MgO_bulk.cube")
+            defect_cube_path = os.path.join(cls.MgO_QE_DIR, "Mg_O_+1", "espresso_std", "Mg_O_+1.cube")
+            cls.qe_defect_entry_beta_3.calculation_metadata["bulk_site_potentials"] = np.array(
+                RunParser("espresso")._get_atomic_site_potentials(bulk_cube_path, beta=3)[
+                    "site_potentials"
+                ]
+            )
+            cls.qe_defect_entry_beta_3.calculation_metadata["defect_site_potentials"] = np.array(
+                RunParser("espresso")._get_atomic_site_potentials(defect_cube_path, beta=3)[
+                    "site_potentials"
+                ]
+            )
+        return cls.qe_defect_entry_beta_3
 
     # --- QE-doped vs QE-sxdefectalign ---
 
@@ -790,6 +812,21 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
 
         # shouldn't match for beta = 0.5 default (sxd data from beta = 1.2)
         entry = self.qe_defect_dict["Mg_O_+3"]
+        self._compare_doped_vs_sxdefectalign(
+            entry, vatoms_path, MGO_DIELECTRIC, atol=0.01, match_expected=False
+        )
+
+    def test_qe_doped_vs_qe_sxdefectalign_q1_beta_3_potentials(self):
+        """
+        Compare QE-doped and QE-sxdefectalign site potentials for q=+1 with
+        ``beta=3``.
+        """
+        vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_+1/beta_3_Bohr/vAtoms.dat")
+        assert os.path.exists(vatoms_path), f"sxdefectalign data not found: {vatoms_path}"
+        entry = self._get_qe_beta_3_entry()
+        self._compare_doped_vs_sxdefectalign(entry, vatoms_path, MGO_DIELECTRIC, atol=0.01)
+
+        entry = self.qe_defect_dict["Mg_O_+1"]
         self._compare_doped_vs_sxdefectalign(
             entry, vatoms_path, MGO_DIELECTRIC, atol=0.01, match_expected=False
         )
@@ -927,4 +964,30 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
             zorder=5,
         )
         ax.legend(fontsize=8)
+        return fig
+
+    @custom_mpl_image_compare("QE_doped_vs_sxd_q1_potentials_beta_3.png")
+    def test_plot_qe_doped_vs_sxd_q1_beta_3(self):
+        """
+        Plot ``doped`` eFNV correction with ``sxdefectalign`` data overlaid for
+        ``QE`` ``q=+1`` with ``beta=3``.
+        """
+        plt.clf()
+        entry = self._get_qe_beta_3_entry()
+        _corr, fig = entry.get_kumagai_correction(plot=True)
+
+        vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_+1/beta_3_Bohr/vAtoms.dat")
+        sx_dist, _sx_vlr, sx_v_diff, _sx_v_diff_lr = _load_sxdefectalign_vatoms(vatoms_path)
+
+        ax = fig.gca()
+        ax.scatter(
+            sx_dist,
+            sx_v_diff,
+            label=r"$V_{\mathrm{def}} - V_{\mathrm{bulk}}$ (sxd)",
+            s=10,
+            color="black",
+            zorder=5,
+        )
+        ax.legend(fontsize=8)
+        assert len(ax.collections) >= 2
         return fig
