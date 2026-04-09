@@ -4,7 +4,6 @@ Tests for Quantum Espresso (QE) defect parsing and charge corrections using
 """
 
 # TODO: Change beta to Angstrom
-# TODO: Some significant duplicate code here, get Claude to reduce
 # TODO: Cube files take up significant space, like LOCPOTs; should compress with gzip and ensure
 #  parseable like this
 
@@ -48,7 +47,22 @@ def _load_sxdefectalign_vatoms(vatoms_path):
     return distance, vlr, v_def_minus_bulk, v_def_minus_bulk_minus_vlr
 
 
-class QEDefectsParserTestCase(unittest.TestCase):
+class _MgOQuantumEspressoDataMixin:
+    @classmethod
+    def _load_mgo_test_data(cls):
+        cls.MgO_QE_DIR = os.path.join(EXAMPLE_DIR, "MgO_qe")
+        cls.MgO_VASP_DIR = os.path.join(EXAMPLE_DIR, "MgO/Defects/Pre_Calculated_Results")
+        cls.MgO_VASP_ENCUT400_DIR = os.path.join(EXAMPLE_DIR, "MgO/ENCUT_400_Defects")
+
+        cls.qe_defect_dict = loadfn(os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict.json"))
+        cls.qe_defect_dict_beta_1_2 = loadfn(os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict_beta_1.2.json"))
+        cls.vasp_defect_dict = loadfn(os.path.join(cls.MgO_VASP_DIR, "MgO_defect_dict.json"))
+        cls.vasp_encut400_defect_dict = loadfn(
+            os.path.join(cls.MgO_VASP_ENCUT400_DIR, "MgO_defect_dict.json")
+        )
+
+
+class QEDefectsParserTestCase(_MgOQuantumEspressoDataMixin, unittest.TestCase):
     """
     Test QE defect parsing using pre-computed defect dicts from MgO examples.
     """
@@ -58,23 +72,24 @@ class QEDefectsParserTestCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.MgO_QE_DIR = os.path.join(EXAMPLE_DIR, "MgO_qe")
-        cls.MgO_VASP_DIR = os.path.join(EXAMPLE_DIR, "MgO/Defects/Pre_Calculated_Results")
-        cls.MgO_VASP_ENCUT400_DIR = os.path.join(EXAMPLE_DIR, "MgO/ENCUT_400_Defects")
-
-        # Load pre-computed defect dicts (much faster than re-parsing cube files)
-        cls.qe_defect_dict = loadfn(os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict.json.gz"))
-        cls.qe_defect_dict_beta_1_2 = loadfn(
-            os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict_beta_1.2.json.gz")
-        )
-        cls.vasp_defect_dict = loadfn(os.path.join(cls.MgO_VASP_DIR, "MgO_defect_dict.json.gz"))
-        cls.vasp_encut400_defect_dict = loadfn(
-            os.path.join(cls.MgO_VASP_ENCUT400_DIR, "MgO_defect_dict.json.gz")
-        )
+        cls._load_mgo_test_data()
 
     def tearDown(self):
-        if_present_rm(os.path.join(self.MgO_QE_DIR, "MgO_defect_dict.json.gz.bak"))
+        if_present_rm(os.path.join(self.MgO_QE_DIR, "MgO_defect_dict.json.bak"))
         plt.close("all")
+
+    @staticmethod
+    def _assert_correction(defect_dict, key, expected, atol=2e-3):
+        actual = defect_dict[key].corrections["kumagai_charge_correction"]
+        assert np.isclose(actual, expected, atol=atol), f"Got {actual}"
+
+    @staticmethod
+    def _assert_correction_agreement(qe_dict, vasp_dict, key, atol):
+        qe_corr = qe_dict[key].corrections["kumagai_charge_correction"]
+        vasp_corr = vasp_dict[key].corrections["kumagai_charge_correction"]
+        assert np.isclose(
+            qe_corr, vasp_corr, atol=atol
+        ), f"QE ({qe_corr:.4f}) vs VASP ({vasp_corr:.4f}) differ by {abs(qe_corr - vasp_corr):.4f} eV"
 
     # --- QE defect dict structure tests ---
 
@@ -102,132 +117,53 @@ class QEDefectsParserTestCase(unittest.TestCase):
     # --- QE correction value tests (with default beta=0.5) ---
 
     def test_qe_kumagai_correction_q1_unrelaxed(self):
-        """
-        Test eFNV correction for unrelaxed q=+1 QE defect.
-        """
-        entry = self.qe_defect_dict["Mg_O_Unrelaxed_+1"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 0.3098, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.qe_defect_dict, "Mg_O_Unrelaxed_+1", 0.3098)
 
     def test_qe_kumagai_correction_q1(self):
-        """
-        Test eFNV correction for q=+1 QE defect.
-        """
-        entry = self.qe_defect_dict["Mg_O_+1"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 0.1934, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.qe_defect_dict, "Mg_O_+1", 0.1934)
 
     def test_qe_kumagai_correction_q2(self):
-        """
-        Test eFNV correction for q=+2 QE defect.
-        """
-        entry = self.qe_defect_dict["Mg_O_+2"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 0.7247, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.qe_defect_dict, "Mg_O_+2", 0.7247)
 
     def test_qe_kumagai_correction_q3(self):
-        """
-        Test eFNV correction for q=+3 QE defect.
-        """
-        entry = self.qe_defect_dict["Mg_O_+3"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 1.573, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.qe_defect_dict, "Mg_O_+3", 1.573)
 
     def test_qe_kumagai_correction_q4(self):
-        """
-        Test eFNV correction for q=+4 QE defect.
-        """
-        entry = self.qe_defect_dict["Mg_O_+4"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 2.6007, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.qe_defect_dict, "Mg_O_+4", 2.6007)
 
     # --- VASP correction value tests (reference values) ---
 
     def test_vasp_kumagai_correction_q1(self):
-        """
-        Test eFNV correction for q=+1 VASP defect.
-        """
-        entry = self.vasp_defect_dict["Mg_O_+1"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 0.1988, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.vasp_defect_dict, "Mg_O_+1", 0.1988)
 
     def test_vasp_kumagai_correction_q2(self):
-        """
-        Test eFNV correction for q=+2 VASP defect.
-        """
-        entry = self.vasp_defect_dict["Mg_O_+2"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 0.7233, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.vasp_defect_dict, "Mg_O_+2", 0.7233)
 
     def test_vasp_kumagai_correction_q3(self):
-        """
-        Test eFNV correction for q=+3 VASP defect.
-        """
-        entry = self.vasp_defect_dict["Mg_O_+3"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 1.572, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.vasp_defect_dict, "Mg_O_+3", 1.572)
 
     def test_vasp_kumagai_correction_q4(self):
-        """
-        Test eFNV correction for q=+4 VASP defect.
-        """
-        entry = self.vasp_defect_dict["Mg_O_+4"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 2.5860, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.vasp_defect_dict, "Mg_O_+4", 2.5860)
 
     # --- QE vs VASP correction comparison (default beta=0.5) ---
 
     def test_qe_vs_vasp_correction_q1(self):
         """
-        Test QE vs VASP eFNV correction agreement for q=+1.
+        Test QE vs VASP eFNV correction agreement for q=+1, Mg_O in MgO.
 
         With beta=0.5 (default), QE and VASP corrections should agree within
         ~0.01 eV for MgO.
         """
-        qe_corr = self.qe_defect_dict["Mg_O_+1"].corrections["kumagai_charge_correction"]
-        vasp_corr = self.vasp_defect_dict["Mg_O_+1"].corrections["kumagai_charge_correction"]
-        assert np.isclose(
-            qe_corr, vasp_corr, atol=0.01
-        ), f"QE ({qe_corr:.4f}) vs VASP ({vasp_corr:.4f}) differ by {abs(qe_corr - vasp_corr):.4f} eV"
+        self._assert_correction_agreement(self.qe_defect_dict, self.vasp_defect_dict, "Mg_O_+1", 0.01)
 
     def test_qe_vs_vasp_correction_q2(self):
-        """
-        Test QE vs VASP eFNV correction agreement for q=+2.
-        """
-        qe_corr = self.qe_defect_dict["Mg_O_+2"].corrections["kumagai_charge_correction"]
-        vasp_corr = self.vasp_defect_dict["Mg_O_+2"].corrections["kumagai_charge_correction"]
-        assert np.isclose(
-            qe_corr, vasp_corr, atol=0.01
-        ), f"QE ({qe_corr:.4f}) vs VASP ({vasp_corr:.4f}) differ by {abs(qe_corr - vasp_corr):.4f} eV"
+        self._assert_correction_agreement(self.qe_defect_dict, self.vasp_defect_dict, "Mg_O_+2", 0.01)
 
     def test_qe_vs_vasp_correction_q3(self):
-        """
-        Test QE vs VASP eFNV correction agreement for q=+3.
-        """
-        qe_corr = self.qe_defect_dict["Mg_O_+3"].corrections["kumagai_charge_correction"]
-        vasp_corr = self.vasp_defect_dict["Mg_O_+3"].corrections["kumagai_charge_correction"]
-        assert np.isclose(
-            qe_corr, vasp_corr, atol=0.01
-        ), f"QE ({qe_corr:.4f}) vs VASP ({vasp_corr:.4f}) differ by {abs(qe_corr - vasp_corr):.4f} eV"
+        self._assert_correction_agreement(self.qe_defect_dict, self.vasp_defect_dict, "Mg_O_+3", 0.01)
 
     def test_qe_vs_vasp_correction_q4(self):
-        """
-        Test QE vs VASP eFNV correction agreement for q=+4.
-        """
-        qe_corr = self.qe_defect_dict["Mg_O_+4"].corrections["kumagai_charge_correction"]
-        vasp_corr = self.vasp_defect_dict["Mg_O_+4"].corrections["kumagai_charge_correction"]
-        assert np.isclose(
-            qe_corr, vasp_corr, atol=0.02
-        ), f"QE ({qe_corr:.4f}) vs VASP ({vasp_corr:.4f}) differ by {abs(qe_corr - vasp_corr):.4f} eV"
+        self._assert_correction_agreement(self.qe_defect_dict, self.vasp_defect_dict, "Mg_O_+4", 0.02)
 
     def test_qe_vs_vasp_unrelaxed_correction(self):
         """
@@ -313,46 +249,26 @@ class QEDefectsParserTestCase(unittest.TestCase):
 
     def test_qe_beta_1_2_correction_q1(self):
         """
-        Test eFNV correction for q=+1 QE defect with beta=1.2.
+        Test eFNV correction for q=+1 Mg_O in MgO (QE) with beta=1.2.
         """
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_+1"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 0.1608, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.qe_defect_dict_beta_1_2, "Mg_O_+1", 0.1608)
 
     def test_qe_beta_1_2_correction_q2(self):
-        """
-        Test eFNV correction for q=+2 QE defect with beta=1.2.
-        """
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_+2"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 0.6567, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.qe_defect_dict_beta_1_2, "Mg_O_+2", 0.6567)
 
     def test_qe_beta_1_2_correction_q3(self):
-        """
-        Test eFNV correction for q=+3 QE defect with beta=1.2.
-        """
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_+3"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 1.4711, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.qe_defect_dict_beta_1_2, "Mg_O_+3", 1.4711)
 
     def test_qe_beta_1_2_correction_q4(self):
-        """
-        Test eFNV correction for q=+4 QE defect with beta=1.2.
-        """
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_+4"]
-        assert np.isclose(
-            entry.corrections["kumagai_charge_correction"], 2.4662, atol=2e-3
-        ), f"Got {entry.corrections['kumagai_charge_correction']}"
+        self._assert_correction(self.qe_defect_dict_beta_1_2, "Mg_O_+4", 2.4662)
 
     def test_qe_beta_1_2_vs_vasp_larger_deviation(self):
         """
         Test that QE corrections with beta=1.2 deviate more from VASP than with
         the default beta=0.5.
 
-        This validates that beta=0.5 is the better default choice.
+        This validates that beta=0.5 is the better default choice, for MgO
+        defects at least.
         """
         diffs_beta_0_5 = []
         diffs_beta_1_2 = []
@@ -386,10 +302,11 @@ class QEDefectsParserFromScratchTestCase(unittest.TestCase):
         cls.MgO_QE_DIR = os.path.join(EXAMPLE_DIR, "MgO_qe")
         cls.pp_folder = os.path.join(EXAMPLE_DIR, "pp_folder")
         cls.bulk_path = os.path.join(cls.MgO_QE_DIR, "MgO_bulk")
-        cls.qe_defect_dict = loadfn(os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict.json.gz"))
+        cls.qe_defect_dict = loadfn(os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict.json"))
 
     def tearDown(self):
-        if_present_rm(os.path.join(self.MgO_QE_DIR, "MgO_defect_dict.json.gz.bak"))
+        if_present_rm(os.path.join(self.MgO_QE_DIR, "MgO_defect_dict.json.bak"))
+        if_present_rm(os.path.join(self.MgO_QE_DIR, "MgO_defect_dict.json.gz"))
         plt.close("all")
 
     def test_qe_defects_parser_from_scratch(self):
@@ -402,6 +319,7 @@ class QEDefectsParserFromScratchTestCase(unittest.TestCase):
             dielectric=MGO_DIELECTRIC,
             bulk_path=self.bulk_path,
             pp_folder=self.pp_folder,
+            json_filename=os.path.join(self.MgO_QE_DIR, "MgO_defect_dict.json"),
         )
         assert any(  # QE parsing should warn about projected magnetisation
             "Projected magnetisation not implemented for QE" in str(warn.message) for warn in w
@@ -428,7 +346,7 @@ class QEDefectsParserFromScratchTestCase(unittest.TestCase):
             bulk_path=self.bulk_path,
             pp_folder=self.pp_folder,
             beta=1.2,
-            json_filename=os.path.join(self.MgO_QE_DIR, "MgO_defect_dict_beta_1.2.json.gz"),
+            json_filename=os.path.join(self.MgO_QE_DIR, "MgO_defect_dict_beta_1.2.json"),
         )
         assert any(  # QE parsing should warn about projected magnetisation
             "Projected magnetisation not implemented for QE" in str(warn.message) for warn in w
@@ -513,7 +431,7 @@ class QEDefectsParserFromScratchTestCase(unittest.TestCase):
         Test ``check_DefectsParser``-style checks on pre-loaded QE defect dict
         entries, validating structure and metadata.
         """
-        qe_defect_dict = loadfn(os.path.join(self.MgO_QE_DIR, "MgO_defect_dict.json.gz"))
+        qe_defect_dict = loadfn(os.path.join(self.MgO_QE_DIR, "MgO_defect_dict.json"))
 
         for name, defect_entry in qe_defect_dict.items():
             print(f"Checking {name}")
@@ -531,7 +449,7 @@ class QEDefectsParserFromScratchTestCase(unittest.TestCase):
             assert defect_entry.defect.site in defect_entry.defect.equivalent_sites
 
 
-class QEvsVASPCorrectionPlottingTestCase(unittest.TestCase):
+class QEvsVASPCorrectionPlottingTestCase(_MgOQuantumEspressoDataMixin, unittest.TestCase):
     """
     Test eFNV correction plotting for QE and VASP defects, including side-by-
     side comparison plots.
@@ -539,18 +457,7 @@ class QEvsVASPCorrectionPlottingTestCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.MgO_QE_DIR = os.path.join(EXAMPLE_DIR, "MgO_qe")
-        cls.MgO_VASP_DIR = os.path.join(EXAMPLE_DIR, "MgO/Defects/Pre_Calculated_Results")
-        cls.MgO_VASP_ENCUT400_DIR = os.path.join(EXAMPLE_DIR, "MgO/ENCUT_400_Defects")
-
-        cls.qe_defect_dict = loadfn(os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict.json.gz"))
-        cls.qe_defect_dict_beta_1_2 = loadfn(
-            os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict_beta_1.2.json.gz")
-        )
-        cls.vasp_defect_dict = loadfn(os.path.join(cls.MgO_VASP_DIR, "MgO_defect_dict.json.gz"))
-        cls.vasp_encut400_defect_dict = loadfn(
-            os.path.join(cls.MgO_VASP_ENCUT400_DIR, "MgO_defect_dict.json.gz")
-        )
+        cls._load_mgo_test_data()
 
     def tearDown(self):
         plt.close("all")
@@ -605,8 +512,8 @@ class QEvsVASPCorrectionPlottingTestCase(unittest.TestCase):
         Test side-by-side QE vs VASP eFNV plot for q=+2.
         """
         plt.clf()
-        _corr_qe, fig_qe = self.qe_defect_dict["Mg_O_+2"].get_kumagai_correction(plot=True)
-        _corr_vasp, fig_vasp = self.vasp_defect_dict["Mg_O_+2"].get_kumagai_correction(plot=True)
+        fig_qe = self.qe_defect_dict["Mg_O_+2"].get_kumagai_correction(plot=True)[1]
+        fig_vasp = self.vasp_defect_dict["Mg_O_+2"].get_kumagai_correction(plot=True)[1]
         return self._make_side_by_side(fig_qe, fig_vasp, subtitles=("QE", "VASP"))
 
     @custom_mpl_image_compare("QE_vs_VASP_Mg_O_+4_eFNV_side_by_side.png")
@@ -615,8 +522,8 @@ class QEvsVASPCorrectionPlottingTestCase(unittest.TestCase):
         Test side-by-side QE vs VASP eFNV plot for q=+4.
         """
         plt.clf()
-        _corr_qe, fig_qe = self.qe_defect_dict["Mg_O_+4"].get_kumagai_correction(plot=True)
-        _corr_vasp, fig_vasp = self.vasp_defect_dict["Mg_O_+4"].get_kumagai_correction(plot=True)
+        fig_qe = self.qe_defect_dict["Mg_O_+4"].get_kumagai_correction(plot=True)[1]
+        fig_vasp = self.vasp_defect_dict["Mg_O_+4"].get_kumagai_correction(plot=True)[1]
         return self._make_side_by_side(fig_qe, fig_vasp, subtitles=("QE", "VASP"))
 
     @custom_mpl_image_compare("QE_vs_VASP_ENCUT400_Unrelaxed_eFNV_side_by_side.png")
@@ -625,10 +532,8 @@ class QEvsVASPCorrectionPlottingTestCase(unittest.TestCase):
         Test side-by-side QE vs VASP (ENCUT=400) eFNV plot for unrelaxed q=+1.
         """
         plt.clf()
-        _corr_qe, fig_qe = self.qe_defect_dict["Mg_O_Unrelaxed_+1"].get_kumagai_correction(plot=True)
-        _corr_vasp, fig_vasp = self.vasp_encut400_defect_dict["Mg_O_Unrelaxed_+1"].get_kumagai_correction(
-            plot=True
-        )
+        fig_qe = self.qe_defect_dict["Mg_O_Unrelaxed_+1"].get_kumagai_correction(plot=True)[1]
+        fig_vasp = self.vasp_encut400_defect_dict["Mg_O_Unrelaxed_+1"].get_kumagai_correction(plot=True)[1]
         return self._make_side_by_side(fig_qe, fig_vasp, subtitles=("QE, Unrelaxed", "VASP, ENCUT=400"))
 
     # --- Beta = 1.2 QE eFNV plots ---
@@ -641,8 +546,8 @@ class QEvsVASPCorrectionPlottingTestCase(unittest.TestCase):
         potentials and larger correction errors.
         """
         plt.clf()
-        _corr_0_5, fig_0_5 = self.qe_defect_dict["Mg_O_+2"].get_kumagai_correction(plot=True)
-        _corr_1_2, fig_1_2 = self.qe_defect_dict_beta_1_2["Mg_O_+2"].get_kumagai_correction(plot=True)
+        fig_0_5 = self.qe_defect_dict["Mg_O_+2"].get_kumagai_correction(plot=True)[1]
+        fig_1_2 = self.qe_defect_dict_beta_1_2["Mg_O_+2"].get_kumagai_correction(plot=True)[1]
         return self._make_side_by_side(fig_0_5, fig_1_2, subtitles=("beta=0.5", "beta=1.2"))
 
     @custom_mpl_image_compare("QE_beta1.2_vs_VASP_Mg_O_+4_eFNV_side_by_side.png")
@@ -654,12 +559,12 @@ class QEvsVASPCorrectionPlottingTestCase(unittest.TestCase):
         default beta=0.5.
         """
         plt.clf()
-        _corr_qe, fig_qe = self.qe_defect_dict_beta_1_2["Mg_O_+4"].get_kumagai_correction(plot=True)
-        _corr_vasp, fig_vasp = self.vasp_defect_dict["Mg_O_+4"].get_kumagai_correction(plot=True)
+        fig_qe = self.qe_defect_dict_beta_1_2["Mg_O_+4"].get_kumagai_correction(plot=True)[1]
+        fig_vasp = self.vasp_defect_dict["Mg_O_+4"].get_kumagai_correction(plot=True)[1]
         return self._make_side_by_side(fig_qe, fig_vasp, subtitles=("QE, beta=1.2", "VASP"))
 
 
-class SxdefectalignComparisonTestCase(unittest.TestCase):
+class SxdefectalignComparisonTestCase(_MgOQuantumEspressoDataMixin, unittest.TestCase):
     """
     Test doped charge corrections against ``sxdefectalign`` reference data for
     both ``QE`` and ``VASP``.
@@ -676,28 +581,17 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.MgO_QE_DIR = os.path.join(EXAMPLE_DIR, "MgO_qe")
-        cls.MgO_VASP_DIR = os.path.join(EXAMPLE_DIR, "MgO/Defects/Pre_Calculated_Results")
-        cls.MgO_VASP_ENCUT400_DIR = os.path.join(EXAMPLE_DIR, "MgO/ENCUT_400_Defects")
+        cls._load_mgo_test_data()
         cls.MgO_QE_sxd_dir = os.path.join(cls.MgO_QE_DIR, "sxdefectalign")
         cls.pp_folder = os.path.join(EXAMPLE_DIR, "pp_folder")
         cls.bulk_path = os.path.join(cls.MgO_QE_DIR, "MgO_bulk")
         cls.qe_defect_entry_beta_3 = None
 
-        cls.qe_defect_dict = loadfn(os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict.json.gz"))
-        cls.qe_defect_dict_beta_1_2 = loadfn(
-            os.path.join(cls.MgO_QE_DIR, "MgO_defect_dict_beta_1.2.json.gz")
-        )
-        cls.vasp_defect_dict = loadfn(os.path.join(cls.MgO_VASP_DIR, "MgO_defect_dict.json.gz"))
-        cls.vasp_encut400_defect_dict = loadfn(
-            os.path.join(cls.MgO_VASP_ENCUT400_DIR, "MgO_defect_dict.json.gz")
-        )
-
     def tearDown(self):
         plt.close("all")
 
     @classmethod
-    def _get_qe_beta_3_entry(cls):
+    def _get_qe_beta_3_entry(cls):  # Mg_O_+1 QE calculation parsed with beta=3 for atomic site potentials
         if cls.qe_defect_entry_beta_3 is None:
             cls.qe_defect_entry_beta_3 = deepcopy(cls.qe_defect_dict["Mg_O_+1"])
             bulk_cube_path = os.path.join(cls.bulk_path, "espresso_std", "MgO_bulk.cube")
@@ -754,20 +648,50 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
         )
         return doped_distances, doped_potentials, sx_dist, sx_v_diff
 
+    def _assert_qe_vs_sxd_case(
+        self,
+        vatoms_relpath,
+        matched_entry,
+        atol,
+        default_entry=None,
+        default_should_match=False,
+    ):
+        vatoms_path = os.path.join(self.MgO_QE_sxd_dir, vatoms_relpath)
+        assert os.path.exists(vatoms_path), f"sxdefectalign data not found: {vatoms_path}"
+        self._compare_doped_vs_sxdefectalign(matched_entry, vatoms_path, MGO_DIELECTRIC, atol=atol)
+        if default_entry is not None:
+            self._compare_doped_vs_sxdefectalign(
+                default_entry, vatoms_path, MGO_DIELECTRIC, atol=atol, match_expected=default_should_match
+            )
+
+    @staticmethod
+    def _overlay_sxd_on_correction_plot(entry, vatoms_path):
+        _corr, fig = entry.get_kumagai_correction(plot=True)
+        sx_dist, _sx_vlr, sx_v_diff, _sx_v_diff_lr = _load_sxdefectalign_vatoms(vatoms_path)
+
+        ax = fig.gca()
+        ax.scatter(
+            sx_dist,
+            sx_v_diff,
+            label=r"$V_{\mathrm{def}} - V_{\mathrm{bulk}}$ (sxd)",
+            s=10,
+            color="black",
+            zorder=5,
+        )
+        ax.legend(fontsize=8)
+        return fig
+
     def test_qe_doped_vs_qe_sxdefectalign_unrelaxed_potentials(self):
         """
         Compare QE-doped site potential differences with QE-sxdefectalign for
         unrelaxed q=+1.
         """
-        vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_Unrelaxed_+1/vAtoms.dat")
-        assert os.path.exists(vatoms_path), f"sxdefectalign data not found: {vatoms_path}"
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_Unrelaxed_+1"]
-        self._compare_doped_vs_sxdefectalign(entry, vatoms_path, MGO_DIELECTRIC, atol=0.001)
-
-        # shouldn't match for beta = 0.5 default (sxd data from beta = 1.2)
-        entry = self.qe_defect_dict["Mg_O_Unrelaxed_+1"]
-        self._compare_doped_vs_sxdefectalign(
-            entry, vatoms_path, MGO_DIELECTRIC, atol=0.001, match_expected=False
+        self._assert_qe_vs_sxd_case(
+            "Mg_O_Unrelaxed_+1/vAtoms.dat",
+            self.qe_defect_dict_beta_1_2["Mg_O_Unrelaxed_+1"],
+            atol=0.001,
+            default_entry=self.qe_defect_dict["Mg_O_Unrelaxed_+1"],
+            default_should_match=False,
         )  # drop atol for this case, as beta = 0.5 also gives a reasonable match to beta = 1.2 in the
         # unrelaxed case
 
@@ -775,45 +699,36 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
         """
         Compare QE-doped and QE-sxdefectalign site potentials for q=+1.
         """
-        vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_+1/vAtoms.dat")
-        assert os.path.exists(vatoms_path), f"sxdefectalign data not found: {vatoms_path}"
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_+1"]
-        self._compare_doped_vs_sxdefectalign(entry, vatoms_path, MGO_DIELECTRIC, atol=0.01)
-
-        # shouldn't match for beta = 0.5 default (sxd data from beta = 1.2)
-        entry = self.qe_defect_dict["Mg_O_+1"]
-        self._compare_doped_vs_sxdefectalign(
-            entry, vatoms_path, MGO_DIELECTRIC, atol=0.01, match_expected=False
+        self._assert_qe_vs_sxd_case(
+            "Mg_O_+1/vAtoms.dat",
+            self.qe_defect_dict_beta_1_2["Mg_O_+1"],
+            atol=0.01,
+            default_entry=self.qe_defect_dict["Mg_O_+1"],
+            default_should_match=False,
         )
 
     def test_qe_doped_vs_qe_sxdefectalign_q2_potentials(self):
         """
         Compare QE-doped and QE-sxdefectalign site potentials for q=+2.
         """
-        vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_+2/vAtoms.dat")
-        assert os.path.exists(vatoms_path)
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_+2"]
-        self._compare_doped_vs_sxdefectalign(entry, vatoms_path, MGO_DIELECTRIC, atol=0.01)
-
-        # shouldn't match for beta = 0.5 default (sxd data from beta = 1.2)
-        entry = self.qe_defect_dict["Mg_O_+2"]
-        self._compare_doped_vs_sxdefectalign(
-            entry, vatoms_path, MGO_DIELECTRIC, atol=0.01, match_expected=False
+        self._assert_qe_vs_sxd_case(
+            "Mg_O_+2/vAtoms.dat",
+            self.qe_defect_dict_beta_1_2["Mg_O_+2"],
+            atol=0.01,
+            default_entry=self.qe_defect_dict["Mg_O_+2"],
+            default_should_match=False,
         )
 
     def test_qe_doped_vs_qe_sxdefectalign_q3_potentials(self):
         """
         Compare QE-doped and QE-sxdefectalign site potentials for q=+3.
         """
-        vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_+3/vAtoms.dat")
-        assert os.path.exists(vatoms_path)
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_+3"]
-        self._compare_doped_vs_sxdefectalign(entry, vatoms_path, MGO_DIELECTRIC, atol=0.01)
-
-        # shouldn't match for beta = 0.5 default (sxd data from beta = 1.2)
-        entry = self.qe_defect_dict["Mg_O_+3"]
-        self._compare_doped_vs_sxdefectalign(
-            entry, vatoms_path, MGO_DIELECTRIC, atol=0.01, match_expected=False
+        self._assert_qe_vs_sxd_case(
+            "Mg_O_+3/vAtoms.dat",
+            self.qe_defect_dict_beta_1_2["Mg_O_+3"],
+            atol=0.01,
+            default_entry=self.qe_defect_dict["Mg_O_+3"],
+            default_should_match=False,
         )
 
     def test_qe_doped_vs_qe_sxdefectalign_q1_beta_3_potentials(self):
@@ -821,14 +736,12 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
         Compare QE-doped and QE-sxdefectalign site potentials for q=+1 with
         ``beta=3``.
         """
-        vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_+1/beta_3_Bohr/vAtoms.dat")
-        assert os.path.exists(vatoms_path), f"sxdefectalign data not found: {vatoms_path}"
-        entry = self._get_qe_beta_3_entry()
-        self._compare_doped_vs_sxdefectalign(entry, vatoms_path, MGO_DIELECTRIC, atol=0.01)
-
-        entry = self.qe_defect_dict["Mg_O_+1"]
-        self._compare_doped_vs_sxdefectalign(
-            entry, vatoms_path, MGO_DIELECTRIC, atol=0.01, match_expected=False
+        self._assert_qe_vs_sxd_case(
+            "Mg_O_+1/beta_3_Bohr/vAtoms.dat",
+            self._get_qe_beta_3_entry(),
+            atol=0.01,
+            default_entry=self.qe_defect_dict["Mg_O_+1"],
+            default_should_match=False,
         )
 
     # --- VASP-doped vs VASP-sxdefectalign ---
@@ -897,24 +810,8 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
         ``QE`` ``q=+1``.
         """
         plt.clf()
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_+1"]
-        _corr, fig = entry.get_kumagai_correction(plot=True)
-
-        # overlay sxdefectalign data
         vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_+1/vAtoms.dat")
-        sx_dist, _sx_vlr, sx_v_diff, _sx_v_diff_lr = _load_sxdefectalign_vatoms(vatoms_path)
-
-        ax = fig.gca()
-        ax.scatter(
-            sx_dist,
-            sx_v_diff,
-            label=r"$V_{\mathrm{def}} - V_{\mathrm{bulk}}$ (sxd)",
-            s=10,
-            color="black",
-            zorder=5,
-        )
-        ax.legend(fontsize=8)
-        return fig
+        return self._overlay_sxd_on_correction_plot(self.qe_defect_dict_beta_1_2["Mg_O_+1"], vatoms_path)
 
     @custom_mpl_image_compare("QE_doped_vs_sxd_q2_potentials.png")
     def test_plot_qe_doped_vs_sxd_q2(self):
@@ -923,23 +820,8 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
         ``QE`` ``q=+2``.
         """
         plt.clf()
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_+2"]
-        _corr, fig = entry.get_kumagai_correction(plot=True)
-
         vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_+2/vAtoms.dat")
-        sx_dist, _sx_vlr, sx_v_diff, _sx_v_diff_lr = _load_sxdefectalign_vatoms(vatoms_path)
-
-        ax = fig.gca()
-        ax.scatter(
-            sx_dist,
-            sx_v_diff,
-            label=r"$V_{\mathrm{def}} - V_{\mathrm{bulk}}$ (sxd)",
-            s=10,
-            color="black",
-            zorder=5,
-        )
-        ax.legend(fontsize=8)
-        return fig
+        return self._overlay_sxd_on_correction_plot(self.qe_defect_dict_beta_1_2["Mg_O_+2"], vatoms_path)
 
     @custom_mpl_image_compare("QE_doped_vs_sxd_q3_potentials.png")
     def test_plot_qe_doped_vs_sxd_q3(self):
@@ -948,23 +830,8 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
         ``QE`` ``q=+3``.
         """
         plt.clf()
-        entry = self.qe_defect_dict_beta_1_2["Mg_O_+3"]
-        _corr, fig = entry.get_kumagai_correction(plot=True)
-
         vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_+3/vAtoms.dat")
-        sx_dist, _sx_vlr, sx_v_diff, _sx_v_diff_lr = _load_sxdefectalign_vatoms(vatoms_path)
-
-        ax = fig.gca()
-        ax.scatter(
-            sx_dist,
-            sx_v_diff,
-            label=r"$V_{\mathrm{def}} - V_{\mathrm{bulk}}$ (sxd)",
-            s=10,
-            color="black",
-            zorder=5,
-        )
-        ax.legend(fontsize=8)
-        return fig
+        return self._overlay_sxd_on_correction_plot(self.qe_defect_dict_beta_1_2["Mg_O_+3"], vatoms_path)
 
     @custom_mpl_image_compare("QE_doped_vs_sxd_q1_potentials_beta_3.png")
     def test_plot_qe_doped_vs_sxd_q1_beta_3(self):
@@ -973,21 +840,7 @@ class SxdefectalignComparisonTestCase(unittest.TestCase):
         ``QE`` ``q=+1`` with ``beta=3``.
         """
         plt.clf()
-        entry = self._get_qe_beta_3_entry()
-        _corr, fig = entry.get_kumagai_correction(plot=True)
-
         vatoms_path = os.path.join(self.MgO_QE_sxd_dir, "Mg_O_+1/beta_3_Bohr/vAtoms.dat")
-        sx_dist, _sx_vlr, sx_v_diff, _sx_v_diff_lr = _load_sxdefectalign_vatoms(vatoms_path)
-
-        ax = fig.gca()
-        ax.scatter(
-            sx_dist,
-            sx_v_diff,
-            label=r"$V_{\mathrm{def}} - V_{\mathrm{bulk}}$ (sxd)",
-            s=10,
-            color="black",
-            zorder=5,
-        )
-        ax.legend(fontsize=8)
-        assert len(ax.collections) >= 2
+        fig = self._overlay_sxd_on_correction_plot(self._get_qe_beta_3_entry(), vatoms_path)
+        assert len(fig.gca().collections) >= 2
         return fig
