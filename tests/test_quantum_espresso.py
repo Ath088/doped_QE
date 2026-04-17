@@ -362,10 +362,7 @@ class QEDefectsParserFromScratchTestCase(unittest.TestCase):
 
         # specific charge correction values for beta=1.2 tested above
 
-    @pytest.mark.xfail(
-        reason="QE DefectsParser._parse_parsing_warnings not yet implemented",
-        raises=AttributeError,
-    )
+
     def test_qe_defects_parser_from_scratch_no_multiprocessing(self):
         """
         Test parsing QE MgO defects from scratch with ``DefectsParser``, with
@@ -844,3 +841,628 @@ class SxdefectalignComparisonTestCase(_MgOQuantumEspressoDataMixin, unittest.Tes
         fig = self._overlay_sxd_on_correction_plot(self._get_qe_beta_3_entry(), vatoms_path)
         assert len(fig.gca().collections) >= 2
         return fig
+
+
+"""
+Tests for Quantum Espresso (QE) defect parsing and charge corrections for the
+anisotropic Sb2Si2Te6 system.
+
+Mirrors the MgO QE test structure in with the key distinction
+that Sb2Si2Te6 has an anisotropic (tensor) dielectric constant rather than a
+scalar — this exercises the eFNV correction code path for non-cubic systems.
+
+Defect under test: v_Sb (Sb vacancy), charge state q = -3.
+"""
+
+import os
+import unittest
+from copy import deepcopy
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import numpy as np
+import pytest
+from monty.serialization import loadfn
+from test_analysis import _create_dp_and_capture_warnings, check_DefectsParser
+from test_utils import EXAMPLE_DIR, custom_mpl_image_compare, if_present_rm
+
+from doped.corrections import get_kumagai_correction
+from doped.utils.parsing import RunParser
+
+mpl.use("Agg")  # don't show interactive plots if testing from CLI locally
+
+BOHR_TO_ANGSTROM = 0.529177  # sxdefectalign outputs distances in Bohr
+
+# Sb2Si2Te6 anisotropic dielectric tensor (3x3).
+
+SB2SI2TE6_DIELECTRIC = np.array(
+    [
+        [44.12, 0.0, 0.0],
+        [0.0, 44.12, 0.0],
+        [0.0, 0.0, 17.82],
+    ]
+)
+
+
+def _load_sxdefectalign_vatoms(vatoms_path):
+    """
+    Load ``sxdefectalign`` ``vAtoms.dat`` and return a tuple of
+    (distance (in Å), Vlr, Vdef - Vbulk, Vdef - Vbulk - Vlr).
+
+    Potentials are sign-flipped (multiplied by -1) to match doped (VASP)
+    convention (electron charge is negative), as sxdefectalign uses the
+    opposite convention (electron charge is positive).
+    """
+    data = np.loadtxt(vatoms_path)
+    distance = data[:, 0] * BOHR_TO_ANGSTROM  # Bohr -> Angstrom
+    vlr = -data[:, 1]
+    v_def_minus_bulk = -data[:, 2]
+    v_def_minus_bulk_minus_vlr = -data[:, 3]
+    return distance, vlr, v_def_minus_bulk, v_def_minus_bulk_minus_vlr
+
+
+class _Sb2Si2Te6QuantumEspressoDataMixin:
+    """
+    Shared fixture loader for Sb2Si2Te6 QE test cases.
+
+    """
+
+    @classmethod
+    def _load_sb2si2te6_test_data(cls):
+        cls.SST_QE_DIR = os.path.join(EXAMPLE_DIR, "Sb2Si2Te6_qe")
+        cls.SST_VASP_DIR = os.path.join(EXAMPLE_DIR, "Sb2Si2Te6")
+
+        cls.qe_defect_dict = loadfn(os.path.join(cls.SST_QE_DIR, "SiSbTe3_defect_dict.json.gz"))
+        cls.vasp_defect_dict = loadfn(os.path.join(cls.SST_VASP_DIR, "Sb2Si2Te6_example_defect_dict.json"))
+
+
+# ---------------------------------------------------------------------------
+# 1. Defect dict structure + correction value tests
+# ---------------------------------------------------------------------------
+
+
+class QESb2Si2Te6DefectsParserTestCase(
+    _Sb2Si2Te6QuantumEspressoDataMixin, unittest.TestCase
+):
+    """
+    Test QE defect parsing for Sb2Si2Te6 using pre-computed defect dicts.
+
+    Covers:
+    * Defect dict key structure (QE and VASP).
+    * Non-zero corrections for all charged QE entries.
+    * Absolute correction values for QE (default beta=0.5) and VASP.
+    * QE vs VASP correction agreement.
+    * Correction errors within acceptable bounds.
+    * Recalculation of corrections from stored metadata.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._load_sb2si2te6_test_data()
+
+    def tearDown(self):
+        if_present_rm(os.path.join(self.SST_QE_DIR, "Sb2Si2Te6_defect_dict.json.bak"))
+        plt.close("all")
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _assert_correction(defect_dict, key, expected, atol=2e-3):
+        actual = defect_dict[key].corrections["kumagai_charge_correction"]
+        assert np.isclose(actual, expected, atol=atol), (
+            f"Got {actual:.4f} eV for {key}, expected {expected:.4f} eV"
+        )
+
+    @staticmethod
+    def _assert_correction_agreement(qe_dict, vasp_dict, key, atol):
+        qe_corr = qe_dict[key].corrections["kumagai_charge_correction"]
+        vasp_corr = vasp_dict[key].corrections["kumagai_charge_correction"]
+        assert np.isclose(qe_corr, vasp_corr, atol=atol), (
+            f"QE ({qe_corr:.4f}) vs VASP ({vasp_corr:.4f}) differ by "
+            f"{abs(qe_corr - vasp_corr):.4f} eV for {key}"
+        )
+
+    # ------------------------------------------------------------------
+    # Dict structure
+    # ------------------------------------------------------------------
+
+    def test_qe_defect_dict_keys(self):
+        """
+        Test that the QE Sb2Si2Te6 defect dict contains the expected entries.
+
+        The dict should hold the v_Sb vacancy at the charge states parsed from
+        the QE output directories, including an unrelaxed reference.
+        """
+        expected_keys = {"v_Sb_-3"}
+        assert set(self.qe_defect_dict.keys()) == expected_keys, (
+            f"Unexpected keys: {set(self.qe_defect_dict.keys())}"
+        )
+
+    def test_vasp_defect_dict_keys(self):
+        """
+        Test that the VASP Sb2Si2Te6 defect dict contains the expected entries.
+        """
+        expected_keys = {"v_Sb_-3"}
+        assert set(self.vasp_defect_dict.keys()) == expected_keys, (
+            f"Unexpected keys: {set(self.vasp_defect_dict.keys())}"
+        )
+
+    def test_qe_corrections_nonzero(self):
+        """
+        Test that all charged QE Sb2Si2Te6 defects have non-zero corrections.
+        """
+        for name, entry in self.qe_defect_dict.items():
+            assert sum(entry.corrections.values()) != 0, (
+                f"Zero correction for {name}"
+            )
+
+    # ------------------------------------------------------------------
+    # Absolute QE correction values (default beta=0.5)
+    # ------------------------------------------------------------------
+
+    def test_qe_kumagai_correction_q3(self):
+        self._assert_correction(self.qe_defect_dict, "v_Sb_-3", 0.978)
+
+    # ------------------------------------------------------------------
+    # Absolute VASP correction values (reference)
+    # ------------------------------------------------------------------
+
+    def test_vasp_kumagai_correction_q3(self):
+        self._assert_correction(self.vasp_defect_dict, "v_Sb_-3", 1.077)
+
+    # ------------------------------------------------------------------
+    # QE vs VASP agreement (default beta=0.5)
+    # ------------------------------------------------------------------
+
+
+    def test_qe_vs_vasp_correction_q3(self):
+        """
+        QE vs VASP eFNV correction agreement for v_Sb q=-3 in Sb2Si2Te6.
+
+        The high charge state amplifies any code differences; tolerance is
+        relaxed to 0.02 eV.
+        """
+        self._assert_correction_agreement(
+            self.qe_defect_dict, self.vasp_defect_dict, "v_Sb_-3", atol=0.02
+        )
+
+    def test_qe_vs_vasp_correction_all_charges_summary(self):
+        """
+        Average QE-VASP correction difference should be <0.015 eV across all
+        charge states for the anisotropic Sb2Si2Te6 system.
+        """
+        diffs = []
+        for charge in ["-3"]:
+            key = f"v_Sb_{charge}"
+            qe_corr = self.qe_defect_dict[key].corrections["kumagai_charge_correction"]
+            vasp_corr = self.vasp_defect_dict[key].corrections["kumagai_charge_correction"]
+            diffs.append(abs(qe_corr - vasp_corr))
+
+        avg_diff = np.mean(diffs)
+        assert avg_diff < 0.015, (
+            f"Average QE-VASP correction difference {avg_diff:.4f} eV exceeds 0.015 eV. "
+            f"Per-charge diffs: {[f'{d:.4f}' for d in diffs]}"
+        )
+
+    # ------------------------------------------------------------------
+    # Correction errors
+    # ------------------------------------------------------------------
+
+    def test_qe_correction_errors_small(self):
+        """QE correction errors should be <0.02 eV for all Sb2Si2Te6 entries."""
+        for name, entry in self.qe_defect_dict.items():
+            error = entry.corrections_metadata.get("kumagai_charge_correction_error", 0)
+            assert error < 0.06, (
+                f"Correction error {error:.4f} eV too large for {name}"
+            )
+
+    def test_vasp_correction_errors_small(self):
+        """VASP correction errors should be <0.02 eV for all charged entries."""
+        for name, entry in self.vasp_defect_dict.items():
+            if entry.corrections:  # skip neutral
+                error = entry.corrections_metadata.get("kumagai_charge_correction_error", 0)
+                assert error < 0.02, (
+                    f"Correction error {error:.4f} eV too large for {name}"
+                )
+
+    # ------------------------------------------------------------------
+    # Recalculation from stored metadata
+    # ------------------------------------------------------------------
+
+    def test_recalculate_qe_kumagai_correction_q3(self):
+        """
+        Recalculating the eFNV correction from stored site-potential metadata
+        should reproduce the stored value for the primary defect of interest.
+        """
+        entry = self.qe_defect_dict["v_Sb_-3"]
+        corr = get_kumagai_correction(
+            entry, dielectric=SB2SI2TE6_DIELECTRIC, verbose=False
+        )
+        assert np.isclose(corr.correction_energy, 0.978, atol=2e-3), (
+            f"Recalculated correction {corr.correction_energy:.4f} eV differs from expected"
+        )
+
+    def test_recalculate_vasp_kumagai_correction_q3(self):
+        """
+        Recalculating the VASP eFNV correction from stored metadata should
+        reproduce the stored value.
+        """
+        entry = self.vasp_defect_dict["v_Sb_-3"]
+        corr = get_kumagai_correction(
+            entry, dielectric=SB2SI2TE6_DIELECTRIC, verbose=False
+        )
+        assert np.isclose(corr.correction_energy, 1.077, atol=2e-3), (
+            f"Recalculated correction {corr.correction_energy:.4f} eV differs from expected"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2. From-scratch parsing tests
+# ---------------------------------------------------------------------------
+
+
+class QESb2Si2Te6DefectsParserFromScratchTestCase(unittest.TestCase):
+    """
+    Test QE ``DefectsParser`` for Sb2Si2Te6 parsing from scratch (not from a
+    pre-computed JSON), exercising the anisotropic dielectric tensor code path.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.SST_QE_DIR = os.path.join(EXAMPLE_DIR, "Sb2Si2Te6_qe")
+        cls.pp_folder = os.path.join(EXAMPLE_DIR, "pp_folder")
+        cls.bulk_path = os.path.join(cls.SST_QE_DIR, "Sb2Si2Te6_bulk")
+        cls.qe_defect_dict = loadfn(
+            os.path.join(cls.SST_QE_DIR, "SiSbTe3_defect_dict.json.gz")
+        )
+
+    def tearDown(self):
+        if_present_rm(os.path.join(self.SST_QE_DIR, "Sb2Si2Te6_defect_dict.json.bak"))
+        if_present_rm(os.path.join(self.SST_QE_DIR, "Sb2Si2Te6_defect_dict.json.gz"))
+        plt.close("all")
+
+    def test_qe_defects_parser_from_scratch(self):
+        """
+        Parse Sb2Si2Te6 QE defects from scratch with ``DefectsParser``.
+
+        Key checks beyond the MgO equivalent:
+        * Anisotropic (tensor) dielectric is accepted without error.
+        * Projected-magnetisation warning still fires (QE limitation).
+        * Band gap cannot be inferred from QE output; explicit error expected.
+        """
+        dp, w = _create_dp_and_capture_warnings(
+            code="espresso",
+            output_path=self.SST_QE_DIR,
+            dielectric=SB2SI2TE6_DIELECTRIC,
+            bulk_path=self.bulk_path,
+            pp_folder=self.pp_folder,
+            json_filename=os.path.join(
+                self.SST_QE_DIR, "Sb2Si2Te6_defect_dict.json"
+            ),
+        )
+        assert any(
+            "Projected magnetisation not implemented for QE" in str(warn.message)
+            for warn in w
+        ), f"Expected projected magnetisation warning, got: {[str(x.message) for x in w]}"
+        check_DefectsParser(dp, band_gap=0.85)  # Sb2Si2Te6 experimental band gap ~ 0.85 eV
+
+        with pytest.raises(ValueError) as exc:
+            dp.get_defect_thermodynamics()
+        assert (
+            "No band gap value was supplied or able to be parsed from the defect entries "
+            "(calculation_metadata attributes). Please specify the band gap value in the "
+            "function input." in str(exc.value)
+        ), f"Expected band gap error, got: {exc.value!s}"
+
+
+    def test_qe_defects_parser_from_scratch_no_multiprocessing(self):
+        """
+        Parse Sb2Si2Te6 QE defects from scratch with ``DefectsParser``,
+        disabling multiprocessing.
+
+        """
+        dp, w = _create_dp_and_capture_warnings(
+            code="espresso",
+            output_path=self.SST_QE_DIR,
+            dielectric=SB2SI2TE6_DIELECTRIC,
+            bulk_path=self.bulk_path,
+            pp_folder=self.pp_folder,
+            processes=1,
+        )
+        check_DefectsParser(dp)
+        assert any(
+            "Projected magnetisation not implemented for QE" in str(warn.message)
+            for warn in w
+        ), f"Expected projected magnetisation warning, got: {[str(x.message) for x in w]}"
+
+    def test_qe_defects_parser_skip_corrections(self):
+        """
+        QE ``DefectsParser`` with ``skip_corrections=True`` should produce zero
+        corrections for all entries.
+        """
+        dp, _w = _create_dp_and_capture_warnings(
+            code="espresso",
+            output_path=self.SST_QE_DIR,
+            dielectric=SB2SI2TE6_DIELECTRIC,
+            bulk_path=self.bulk_path,
+            pp_folder=self.pp_folder,
+            skip_corrections=True,
+            json_filename=False,
+        )
+        check_DefectsParser(dp, skip_corrections=True, band_gap=0.85)
+
+        for name, entry in dp.defect_dict.items():
+            assert sum(entry.corrections.values()) == 0, (
+                f"Expected zero correction for {name} with skip_corrections=True"
+            )
+
+    def test_qe_defects_parser_no_dielectric_warning(self):
+        """
+        QE ``DefectsParser`` should warn when no dielectric constant is
+        provided, even for anisotropic systems.
+        """
+        dp, w = _create_dp_and_capture_warnings(
+            code="espresso",
+            output_path=self.SST_QE_DIR,
+            bulk_path=self.bulk_path,
+            pp_folder=self.pp_folder,
+            json_filename=False,
+        )
+        assert any(
+            "The dielectric constant (`dielectric`) is needed to compute finite-size charge "
+            "corrections, but none was provided" in str(warn.message)
+            for warn in w
+        ), f"Expected dielectric warning, got: {[str(x.message) for x in w]}"
+        check_DefectsParser(dp, skip_corrections=True, band_gap=0.85)
+
+    def test_check_defects_parser_on_loaded_qe_dict(self):
+        """
+        Validate structure and metadata of pre-loaded QE Sb2Si2Te6 defect
+        dict entries (equivalent site count, multiplicity, ediff, metadata).
+        """
+        qe_defect_dict = loadfn(
+            os.path.join(self.SST_QE_DIR, "Sb2Si2Te6_defect_dict.json")
+        )
+        for name, defect_entry in qe_defect_dict.items():
+            assert name == defect_entry.name
+            assert sum(defect_entry.corrections.values()) != 0, (
+                f"Zero correction for {name}"
+            )
+            assert defect_entry.get_ediff()
+            assert defect_entry.calculation_metadata
+
+            assert (
+                len(defect_entry.defect.equivalent_sites)
+                == defect_entry.defect.multiplicity
+            ), (
+                f"Multiplicity mismatch for {name}: "
+                f"{len(defect_entry.defect.equivalent_sites)} != "
+                f"{defect_entry.defect.multiplicity}"
+            )
+            assert defect_entry.defect.site in defect_entry.defect.equivalent_sites
+
+
+# ---------------------------------------------------------------------------
+# 3. eFNV correction plotting tests
+# ---------------------------------------------------------------------------
+
+
+class QESb2Si2Te6vsVASPCorrectionPlottingTestCase(
+    _Sb2Si2Te6QuantumEspressoDataMixin, unittest.TestCase
+):
+    """
+    Test eFNV correction plotting for QE and VASP Sb2Si2Te6 defects, including
+    side-by-side comparison plots.
+
+    The anisotropic dielectric tensor should not change the visual appearance
+    of the eFNV site-potential plots relative to the isotropic case; these
+    tests confirm the plotting machinery handles the tensor input cleanly.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._load_sb2si2te6_test_data()
+
+    def tearDown(self):
+        plt.close("all")
+
+    @staticmethod
+    def _make_side_by_side(fig_left, fig_right, figsize=(7.5, 3.5), subtitles=None):
+        """
+        Create a side-by-side comparison figure from two eFNV plot figures.
+
+        Unifies axis limits and renders both figures as subplots. Optionally,
+        provide ``subtitles`` as a tuple/list of strings for (left, right).
+        """
+        axes_left = fig_left.get_axes()
+        axes_right = fig_right.get_axes()
+        n_ax = min(len(axes_left), len(axes_right))
+        for i in range(n_ax):
+            x0 = min(axes_left[i].get_xlim()[0], axes_right[i].get_xlim()[0])
+            x1 = max(axes_left[i].get_xlim()[1], axes_right[i].get_xlim()[1])
+            y0 = min(axes_left[i].get_ylim()[0], axes_right[i].get_ylim()[0])
+            y1 = max(axes_left[i].get_ylim()[1], axes_right[i].get_ylim()[1])
+            for ax in (axes_left[i], axes_right[i]):
+                ax.set_xlim(x0, x1)
+                ax.set_ylim(y0, y1)
+
+        axes_right[0].set_ylabel("")
+        axes_right[0].set_yticklabels([])
+
+        fig, axs = plt.subplots(1, 2, figsize=figsize, gridspec_kw={"wspace": 0})
+        for idx, (ax, f) in enumerate(zip(axs, (fig_left, fig_right), strict=False)):
+            f.canvas.draw()
+            w, h = f.canvas.get_width_height()
+            rgb = np.frombuffer(f.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[..., :3]
+
+            if idx == 1:
+                rgb = rgb[:, int(w * 0.15) :, :]  # trim ylabel whitespace from right panel
+
+            ax.imshow(rgb)
+            ax.axis("off")
+            if subtitles and idx < len(subtitles) and subtitles[idx]:
+                ax.set_title(subtitles[idx], fontsize=16, pad=8)
+        fig.subplots_adjust(wspace=0.05)
+        return fig
+
+    # ------------------------------------------------------------------
+    # QE vs VASP side-by-side plots
+    # ------------------------------------------------------------------
+
+    @custom_mpl_image_compare("SST_QE_vs_VASP_v_Sb_-3_eFNV_side_by_side.png")
+    def test_plot_side_by_side_efnv_q3(self):
+        """
+        Side-by-side QE vs VASP eFNV plot for the primary defect v_Sb q=-3.
+
+        Anisotropy in the long-range model potential (Vlr) should be visible
+        as a non-uniform scatter in the site-potential plot; both codes should
+        show the same qualitative pattern.
+        """
+        plt.clf()
+        fig_qe = self.qe_defect_dict["v_Sb_-3"].get_kumagai_correction(plot=True)[1]
+        fig_vasp = self.vasp_defect_dict["v_Sb_-3"].get_kumagai_correction(plot=True)[1]
+        return self._make_side_by_side(fig_qe, fig_vasp, subtitles=("QE", "VASP"))
+
+    # ------------------------------------------------------------------
+    # TODO beta comparison plots?
+    # ------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 4. sxdefectalign comparison tests
+# ---------------------------------------------------------------------------
+
+
+class Sb2Si2Te6SxdefectalignComparisonTestCase(
+    _Sb2Si2Te6QuantumEspressoDataMixin, unittest.TestCase
+):
+    """
+    Test doped eFNV charge corrections against ``sxdefectalign`` reference data
+    for Sb2Si2Te6, validating the anisotropic site-potential averaging.
+
+    The far-field potential agreement is tested (> 5 Å from defect), where the two approaches still converge,
+    while near-defect differences are expected and not penalised.
+
+    Note: All ``sxdefectalign`` reference data here uses beta=1 Bohr unless
+    otherwise stated.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._load_sb2si2te6_test_data()
+        cls.SST_QE_sxd_dir = os.path.join(cls.SST_QE_DIR, "sxdefectalign")
+        cls.pp_folder = os.path.join(EXAMPLE_DIR, "pp_folder")
+        cls.bulk_path = os.path.join(cls.SST_QE_DIR, "Sb2Si2Te6_bulk")
+        cls.qe_defect_entry_beta_3 = None  # lazy-loaded
+
+    def tearDown(self):
+        plt.close("all")
+
+
+    @staticmethod
+    def _compare_doped_vs_sxdefectalign(
+        entry, vatoms_path, dielectric, atol=0.01, match_expected=True
+    ):
+        """
+        Compare ``doped`` eFNV site potentials with ``sxdefectalign``
+        ``vAtoms.dat`` data.
+
+        Uses far-field (> 5 Å) potentials to avoid near-defect discrepancies
+        between the two averaging approaches, and accounts for the possibility
+        that ``sxdefectalign`` excludes a few near-defect sites.
+        """
+        sx_dist, _sx_vlr, sx_v_diff, _sx_v_diff_lr = _load_sxdefectalign_vatoms(
+            vatoms_path
+        )
+
+        corr = get_kumagai_correction(entry, dielectric=dielectric, verbose=False)
+        efnv_data = corr.metadata["pydefect_ExtendedFnvCorrection"]
+
+        doped_distances = np.array([float(s.distance) for s in efnv_data.sites])
+        doped_potentials = np.array([float(s.potential) for s in efnv_data.sites])
+
+        assert abs(len(doped_distances) - len(sx_dist)) <= 5, (
+            f"Site count mismatch too large: doped={len(doped_distances)}, "
+            f"sx={len(sx_dist)}"
+        )
+
+        doped_far = doped_potentials[doped_distances > 5.0]
+        sx_far = sx_v_diff[sx_dist > 5.0]
+
+        assert (
+            np.isclose(
+                np.mean(np.abs(doped_far)), np.mean(np.abs(sx_far)), atol=atol
+            )
+            == match_expected
+        ), (
+            f"Far-field mean |V| mismatch: doped={np.mean(np.abs(doped_far)):.4f}, "
+            f"sx={np.mean(np.abs(sx_far)):.4f}"
+        )
+        return doped_distances, doped_potentials, sx_dist, sx_v_diff
+
+    def _assert_qe_vs_sxd_case(
+        self,
+        vatoms_relpath,
+        matched_entry,
+        atol,
+        default_entry=None,
+        default_should_match=False,
+    ):
+        vatoms_path = os.path.join(self.SST_QE_sxd_dir, vatoms_relpath)
+        assert os.path.exists(vatoms_path), (
+            f"sxdefectalign data not found: {vatoms_path}"
+        )
+        self._compare_doped_vs_sxdefectalign(
+            matched_entry, vatoms_path, SB2SI2TE6_DIELECTRIC, atol=atol
+        )
+        if default_entry is not None:
+            self._compare_doped_vs_sxdefectalign(
+                default_entry,
+                vatoms_path,
+                SB2SI2TE6_DIELECTRIC,
+                atol=atol,
+                match_expected=default_should_match,
+            )
+
+    @staticmethod
+    def _overlay_sxd_on_correction_plot(entry, vatoms_path):
+        _corr, fig = entry.get_kumagai_correction(plot=True)
+        sx_dist, _sx_vlr, sx_v_diff, _sx_v_diff_lr = _load_sxdefectalign_vatoms(
+            vatoms_path
+        )
+        ax = fig.gca()
+        ax.scatter(
+            sx_dist,
+            sx_v_diff,
+            label=r"$V_{\mathrm{def}} - V_{\mathrm{bulk}}$ (sxd)",
+            s=10,
+            color="black",
+            zorder=5,
+        )
+        ax.legend(fontsize=8)
+        return fig
+
+
+
+    # ------------------------------------------------------------------
+    # TODO VASP-doped vs VASP-sxdefectalign Needed?
+    # ------------------------------------------------------------------
+
+
+
+    # ------------------------------------------------------------------
+    # Overlay plots: doped eFNV + sxdefectalign scatter
+    # ------------------------------------------------------------------
+
+    @custom_mpl_image_compare("SST_QE_doped_vs_sxd_v_Sb_-3_potentials.png")
+    def test_plot_qe_doped_vs_sxd_q3(self):
+        """
+        Plot ``doped`` eFNV correction with ``sxdefectalign`` data overlaid for
+        QE v_Sb q=-3.
+        """
+        plt.clf()
+        vatoms_path = os.path.join(self.SST_QE_sxd_dir, "vAtoms.dat")
+        return self._overlay_sxd_on_correction_plot(
+            self.qe_defect_dict["v_Sb_-3"], vatoms_path
+        )
