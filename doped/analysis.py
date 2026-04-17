@@ -5132,8 +5132,8 @@ class DefectsParserEspresso(DefectsParserVasp):
                         defect_folder
                     )
                     parsing_warnings.append(
-                        self._parse_parsing_warnings(  # TODO: This causes an error, not defined for espresso parsing
-                            warnings_string, defect_folder, f"{defect_folder}/{self.subfolder}"
+                        self._update_pbar_and_return_warnings_from_parsing(
+                            parsed_defect_entry, warnings_string, defect_folder, pbar
                         )
                     )
                     if parsed_defect_entry is not None:
