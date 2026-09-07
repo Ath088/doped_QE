@@ -3181,9 +3181,15 @@ class CompetingPhasesAnalyzer(MSONable):
         entry can be a direct calculation output file path
         (``vasprun.xml(.gz)`` with ``VASP``) or a directory containing one.
         """
-        output_file = self._backend.CALC_OUTPUT_MASK[0]
+        calc_output_mask = self._backend.CALC_OUTPUT_MASK
         for entry_path in path_list:
-            if str(output_file) in str(entry_path) and not str(entry_path).startswith("."):
+            # ``os.path.isdir`` guard because mask entries can be loose (e.g. espresso's ``.xml``), and
+            # so match the path of a *directory* which merely contains a calculation output:
+            if (
+                not os.path.isdir(entry_path)
+                and any(pattern in str(entry_path) for pattern in calc_output_mask)
+                and not str(entry_path).startswith(".")
+            ):
                 self.calc_output_paths.append(str(entry_path))
                 continue
 
@@ -3232,13 +3238,18 @@ class CompetingPhasesAnalyzer(MSONable):
                 )
 
         for directory in sorted(calc_files_df["folder_path"].unique()):
-            calc_output_path, multiple = _io_utils._get_output_files_and_check_if_multiple(
-                output_file, str(directory)
-            )
-            if calc_output_path and os.path.exists(calc_output_path):
-                if multiple:
-                    self._multiple_files_warning(output_file, directory, calc_output_path)
-                self.calc_output_paths.append(calc_output_path)
+            # search the full mask, not just its first entry; a calculator's mask entries need not be
+            # substrings of one another (e.g. espresso's ``.xml``, matching ``pw.x``'s default
+            # ``<prefix>.xml`` naming, which ``espresso.xml`` -- a ``doped`` convention -- does not):
+            for pattern in backend.CALC_OUTPUT_MASK:  # decreasing specificity, as mask-ordered
+                calc_output_path, multiple = _io_utils._get_output_files_and_check_if_multiple(
+                    pattern, str(directory)
+                )
+                if calc_output_path and os.path.exists(calc_output_path):
+                    if multiple:
+                        self._multiple_files_warning(pattern, directory, calc_output_path)
+                    self.calc_output_paths.append(calc_output_path)
+                    break
 
     def _find_calc_output_in_directory(self, directory: PathLike) -> str | None:
         """
@@ -3247,16 +3258,18 @@ class CompetingPhasesAnalyzer(MSONable):
 
         Returns the path as a string, or ``None`` if not found.
         """
-        output_file = self._backend.CALC_OUTPUT_MASK[0]
-        calc_output_path, multiple = None, False
-        with contextlib.suppress(FileNotFoundError):
-            calc_output_path, multiple = _io_utils._get_output_files_and_check_if_multiple(
-                output_file, str(directory)
-            )
-        if calc_output_path and os.path.exists(calc_output_path):
-            if multiple:
-                self._multiple_files_warning(output_file, directory, calc_output_path)
-            return str(calc_output_path)
+        # search the full mask, not just its first entry; see note in
+        # ``_collect_calc_outputs_from_directory``:
+        for pattern in self._backend.CALC_OUTPUT_MASK:  # decreasing specificity, as mask-ordered
+            calc_output_path, multiple = None, False
+            with contextlib.suppress(FileNotFoundError):
+                calc_output_path, multiple = _io_utils._get_output_files_and_check_if_multiple(
+                    pattern, str(directory)
+                )
+            if calc_output_path and os.path.exists(calc_output_path):
+                if multiple:
+                    self._multiple_files_warning(pattern, directory, calc_output_path)
+                return str(calc_output_path)
         return None
 
     def _multiple_files_warning(self, output_file, directory, chosen_filepath) -> None:

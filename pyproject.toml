@@ -66,6 +66,11 @@ analysis = [
     "nonrad",
     #"CarrierCapture.jl"
 ]
+# calculator-specific backends (``doped.io.<calculator>``); extras are named after the calculator,
+# which ``doped.io.get_backend`` relies on when reporting a missing dependency:
+espresso = [
+    "pymatgen-io-espresso",  # Quantum ESPRESSO (``pw.x``/``pp.x``/``dos.x``) I/O, for ``doped.io.espresso``
+]
 
 [tool.setuptools.packages.find]
 exclude = ["examples*", "*testing", "tests*", "docs*"]

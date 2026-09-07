@@ -3,6 +3,7 @@ Code to parse defect supercell calculations, and identify the defects therein.
 """
 
 import contextlib
+import inspect
 import os
 import warnings
 from collections.abc import Iterable
@@ -952,6 +953,12 @@ class DefectsParser:
                 controlling shallow defect charge correction error warnings
                 (see ``error_tolerance`` description) with
                 ``shallow_charge_stability_tolerance``.
+                Calculator-specific potential-parsing options are also
+                forwarded to the ``doped.io`` backend where it accepts them,
+                and ignored otherwise -- currently ``beta``, the Gaussian
+                broadening width used when sampling atomic-site potentials
+                from a volumetric file (in bohr, for ``pp.x`` ``.cube`` files
+                with espresso; unused with VASP).
                 Note that ``bulk_symprec`` can be supplied as the ``symprec``
                 value to use for determining equivalent sites (and thus defect
                 multiplicities / bulk site symmetries), while an input
@@ -1034,7 +1041,12 @@ class DefectsParser:
                 self.bulk_corrections_data["bulk_site_potentials"] = (
                     self.bulk_outputs.site_potentials
                     if self.bulk_outputs.site_potentials is not None
-                    else self._backend.get_site_potentials(outputs=self.bulk_outputs, **bulk_corr_kwargs)
+                    else self._backend.get_site_potentials(
+                        outputs=self.bulk_outputs,
+                        **bulk_corr_kwargs,
+                        # calculator-specific options (e.g. espresso's ``beta``), if given:
+                        **_backend_potential_kwargs(self._backend.get_site_potentials, self.kwargs),
+                    )
                 )
 
         self.defect_dict = {}
@@ -1364,6 +1376,7 @@ class DefectsParser:
                 "`DefectsParser.defect_dict`."
             )
 
+        kwargs.setdefault("calculator", self.calculator)  
         return DefectThermodynamics(
             list(self.defect_dict.values()),
             chempots=chempots,
@@ -1754,6 +1767,57 @@ def _get_total_energies(computed_entry=None):
     return [computed_entry.energy] if computed_entry else []
 
 
+_BACKEND_POTENTIAL_KWARGS = ("beta",)
+"""
+Names of calculator-specific keyword arguments which |DefectsParser| /
+|DefectParser| forward from their ``**kwargs`` to the ``doped.io`` backend's
+potential-parsing functions (``get_site_potentials()`` /
+``get_planar_averaged_potentials()``).
+
+Currently just ``beta``, the Gaussian broadening width used when sampling
+atomic-site potentials from a volumetric file (``pp.x`` ``.cube`` with
+espresso). Only those a given backend actually accepts are passed on (see
+:func:`_backend_potential_kwargs`), so these remain optional for any backend
+and no backend needs to know about options it does not use.
+"""
+
+
+def _backend_potential_kwargs(backend_func, kwargs: dict) -> dict:
+    """
+    Select the calculator-specific potential-parsing keyword arguments (see
+    :data:`_BACKEND_POTENTIAL_KWARGS`) from ``kwargs`` which ``backend_func``
+    accepts.
+
+    Keeps the calculator-agnostic parsing code free of calculator-specific
+    parameters, while still letting the user set them: an option is forwarded
+    only to backends whose signature takes it (or which accept ``**kwargs``),
+    and silently dropped for backends where it is meaningless (e.g. ``beta``
+    with VASP, whose site potentials come from ``OUTCAR`` core levels and need
+    no broadening).
+
+    Args:
+        backend_func (Callable):
+            The backend function about to be called.
+        kwargs (dict):
+            The parser's ``kwargs`` dict, possibly containing some of
+            :data:`_BACKEND_POTENTIAL_KWARGS`.
+
+    Returns:
+        dict: The subset of ``kwargs`` to forward to ``backend_func``.
+    """
+    try:
+        parameters = inspect.signature(backend_func).parameters
+    except (TypeError, ValueError):  # un-introspectable callable; forward nothing
+        return {}
+
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        accepted = set(_BACKEND_POTENTIAL_KWARGS)  # ``**kwargs``; tolerates any of them
+    else:
+        accepted = {name for name in _BACKEND_POTENTIAL_KWARGS if name in parameters}
+
+    return {name: value for name, value in kwargs.items() if name in accepted}
+
+
 def _name_parsed_defect_entries(
     parsed_defect_entries: list[DefectEntry], subfolder: str = "."
 ) -> dict[str, DefectEntry]:
@@ -1903,6 +1967,39 @@ def _warn_calculation_mismatches(
         )
 
 
+def _band_edges_available(defect_entries: Iterable[DefectEntry]) -> bool:
+    r"""
+    Whether the host band edges (VBM eigenvalue and band gap) can be determined
+    from the ``calculation_metadata`` of ``defect_entries``, and so whether a
+    |DefectThermodynamics| object can be created from them.
+
+    Mirrors the band edge parsing in ``DefectThermodynamics.__init__``, which
+    errors if either is unavailable -- so this allows |DefectThermodynamics| to
+    be created only when it will succeed, letting calculator-agnostic parsing
+    code skip the analyses which need it rather than failing outright.
+
+    The band gap is unavailable when no empty (conduction) bands were included
+    in the bulk supercell calculation, as the CBM is then undefined -- e.g.
+    with Quantum ESPRESSO, whose default ``nbnd`` with
+    ``occupations = 'fixed'`` is exactly ``nelec/2``.
+
+    Args:
+        defect_entries (Iterable[|DefectEntry|]):
+            The parsed |DefectEntry|\s to check.
+
+    Returns:
+        bool: Whether both the VBM and band gap are available.
+    """
+    defect_entries = list(defect_entries)
+    return any(
+        defect_entry.calculation_metadata.get("vbm") is not None for defect_entry in defect_entries
+    ) and any(
+        defect_entry.calculation_metadata.get(key) is not None
+        for defect_entry in defect_entries
+        for key in ("band_gap", "gap")
+    )
+
+
 def _handle_charge_correction_errors(
     defect_dict: dict[str, DefectEntry], error_tolerance: float, **kwargs
 ) -> None:
@@ -1922,23 +2019,39 @@ def _handle_charge_correction_errors(
     """
     FNV_correction_errors: list[tuple[str, float]] = []
     eFNV_correction_errors: list[tuple[str, float]] = []
-    defect_thermo = DefectThermodynamics(
-        list(defect_dict.values()), check_compatibility=False, skip_dos_check=True
+
+    defect_thermo = (
+        DefectThermodynamics(
+            list(defect_dict.values()), check_compatibility=False, skip_dos_check=True
+        )
+        if _band_edges_available(defect_dict.values())
+        else None
     )
+    if defect_thermo is None:
+        warnings.warn(
+            "The host band edges (VBM eigenvalue and band gap) could not be determined from the "
+            "parsed defect entries. Please recheck your calculation."
+        )
 
     for name, defect_entry in defect_dict.items():
-        # first check if it's a stable defect:
-        fermi_stability_window = defect_thermo._get_in_gap_fermi_level_stability_window(defect_entry)
-
-        if fermi_stability_window < 0 or (  # Note we avoid the prune_to_stable_entries() method here
-            defect_entry.is_shallow  # as this would require two |DefectThermodynamics| inits...
-            and fermi_stability_window
-            < kwargs.get(
-                "shallow_charge_stability_tolerance",
-                min(error_tolerance, defect_thermo.band_gap * 0.1 if defect_thermo.band_gap else 0.05),
+        if defect_thermo is not None:
+            # first check if it's a stable defect:
+            fermi_stability_window = defect_thermo._get_in_gap_fermi_level_stability_window(
+                defect_entry
             )
-        ):
-            continue  # no charge correction warnings for unstable charge states
+
+            if fermi_stability_window < 0 or (  # Note we avoid the prune_to_stable_entries() method
+                defect_entry.is_shallow  # here as this would require two |DefectThermodynamics| inits
+                and fermi_stability_window
+                < kwargs.get(
+                    "shallow_charge_stability_tolerance",
+                    min(
+                        error_tolerance,
+                        defect_thermo.band_gap * 0.1 if defect_thermo.band_gap else 0.05,
+                    ),
+                )
+            ):
+                continue  # no charge correction warnings for unstable charge states
 
         for correction_type, correction_error_list in [
             ("freysoldt", FNV_correction_errors),
@@ -2301,6 +2414,12 @@ class DefectParser:
                 ``use_MP``, ``mpid``, ``api_key``, ``oxi_state``,
                 ``multiplicity``, ``angle_tolerance``, ``user_charges`` etc
                 (see their docstrings).
+                Calculator-specific potential-parsing options are also
+                forwarded to the ``doped.io`` backend where it accepts them,
+                and ignored otherwise -- currently ``beta``, the Gaussian
+                broadening width used when sampling atomic-site potentials
+                from a volumetric file (in bohr, for ``pp.x`` ``.cube`` files
+                with espresso; unused with VASP).
                 Primarily used by |DefectsParser| to expedite parsing by
                 avoiding reloading bulk data for each defect. Note that
                 ``bulk_symprec`` can be supplied as the ``symprec`` value to
@@ -2442,6 +2561,12 @@ class DefectParser:
                 ``use_MP``, ``mpid``, ``api_key``, ``oxi_state``,
                 ``multiplicity``, ``angle_tolerance``, ``user_charges`` etc
                 (see their docstrings).
+                Calculator-specific potential-parsing options are also
+                forwarded to the ``doped.io`` backend where it accepts them,
+                and ignored otherwise -- currently ``beta``, the Gaussian
+                broadening width used when sampling atomic-site potentials
+                from a volumetric file (in bohr, for ``pp.x`` ``.cube`` files
+                with espresso; unused with VASP).
                 Primarily used by |DefectsParser| to expedite parsing by
                 avoiding reloading bulk data for each defect. Note that
                 ``bulk_symprec`` can be supplied as the ``symprec`` value to
@@ -2827,6 +2952,10 @@ class DefectParser:
         if bulk_site_potentials is None and self.bulk_outputs is not None:
             bulk_site_potentials = self.bulk_outputs.site_potentials  # already parsed
 
+        backend_kwargs = _backend_potential_kwargs(  # e.g. espresso's ``beta``, if given
+            self._backend.get_site_potentials, self.kwargs
+        )
+
         if bulk_site_potentials is None:
             bulk_site_potentials = self._backend.get_site_potentials(
                 self.defect_entry.calculation_metadata["bulk_path"],
@@ -2837,6 +2966,7 @@ class DefectParser:
                     if self.bulk_outputs is not None
                     else _get_total_energies(self.defect_entry.bulk_entry)
                 ),
+                **backend_kwargs,
             )
 
         if self.defect_outputs is not None and self.defect_outputs.site_potentials is not None:
@@ -2851,6 +2981,7 @@ class DefectParser:
                     if self.defect_outputs is not None
                     else _get_total_energies(self.defect_entry.sc_entry)
                 ),
+                **backend_kwargs,
             )
 
         self.defect_entry.calculation_metadata.update(
