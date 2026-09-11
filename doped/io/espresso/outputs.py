@@ -745,15 +745,16 @@ def calculation_outputs_from_pwxml(
     if projected_eigenvalues is None and projections is not None:
         projected_eigenvalues = getattr(projections, "data", None)
 
-    # TODO: Revisit this implementation. ``nelect`` is taken from the XML ``nelec`` tag only; there is
-    # deliberately no ``nelect_from_eigenvalues`` fallback, because that helper assumes VASP's
-    # convention (``k``-point weights summing to 1, with the spin degeneracy implicit in singly-
-    # normalised occupancies) whereas espresso folds the spin factor of 2 into the weights themselves
-    # for ``nspin = 1`` (they sum to 2), so its weighted occupancy sum already equals ``nelec`` and the
-    # helper would double it. Note that this same convention difference makes
-    # ``doped.utils.eigenvalues._is_noncollinear`` misclassify non-spin-polarised espresso
-    # calculations as non-collinear; needs addressing for the eigenvalue analyses.
     nelect = getattr(pwxml, "nelec", None)
+
+    # ``pw.x`` writes the ``k``-point weights (``wk``) summing to 2 for non-spin-polarised
+    # calculations, folding the spin degeneracy factor of 2 into the weights
+    # themselves, but summing to 1 for non-collinear (``noncolin``) and (per spin channel) collinear
+    # spin-polarised (``nspin = 2``) calculations. ``CalculationOutputs.kpoint_weights`` follows the
+    # VASP convention of weights summing to 1, so normalising the weighted sum for espresso:
+    kpoint_weights = np.array(pwxml.actual_kpoints_weights, dtype=float)
+    if (total_weight := kpoint_weights.sum()) > 0:
+        kpoint_weights /= total_weight
 
     return CalculationOutputs(
         structure=pwxml.final_structure,
@@ -766,7 +767,7 @@ def calculation_outputs_from_pwxml(
         eigenvalues=pwxml.eigenvalues,
         projected_eigenvalues=projected_eigenvalues,
         kpoint_coords=np.array(pwxml.actual_kpoints),
-        kpoint_weights=np.array(pwxml.actual_kpoints_weights),
+        kpoint_weights=kpoint_weights,
         nelect=nelect,
         charge=charge,
         magnetization=get_magnetization_from_espressorun(pwxml),
