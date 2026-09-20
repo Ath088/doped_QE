@@ -357,9 +357,9 @@ class SitePotentialSmearingTestCase(unittest.TestCase):
         # the sampled potentials are negated, for the ``doped``/``pydefect`` eFNV sign convention:
         site_potential = get_atomic_site_potentials(volumetric_data, beta=beta)["site_potentials"][0]
 
-        # ``rtol`` is set by the cubic interpolation onto the site (~2e-6 here); the wrong Miller
-        # index would shift the result by ~23%, i.e. three orders of magnitude more:
-        assert np.isclose(site_potential, -np.exp(-0.5 * beta**2 * (2 * np.pi * h / a) ** 2), rtol=1e-4)
+        # exact to machine precision, as this site lies on a grid point; the wrong Miller index
+        # would shift the result by ~23%:
+        assert np.isclose(site_potential, -np.exp(-0.5 * beta**2 * (2 * np.pi * h / a) ** 2), rtol=1e-12)
 
     def test_even_grid_frequencies_unchanged(self):
         """

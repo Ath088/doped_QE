@@ -17,7 +17,7 @@ from pymatgen.io.espresso.utils import parse_pwvals
 from pymatgen.io.vasp import VolumetricData
 from pymatgen.io.vasp.inputs import UnknownPotcarWarning
 from pymatgen.util.typing import PathLike
-from scipy.interpolate import RegularGridInterpolator
+from scipy.ndimage import map_coordinates
 
 from doped.io import utils as _io_utils
 from doped.io.espresso.inputs import SUBFOLDER_PRIORITY  # noqa: F401  (re-exported backend constant)
@@ -652,35 +652,20 @@ def interpolate_potentials_at_atomic_sites(
             The potential at each site, ordered as ``frac_coords`` if given
             and otherwise as ``volumetric_data.structure.sites``.
     """
-    nx, ny, nz = volumetric_data.dim
-
-    xpoints = np.linspace(0.0, 1.0, nx, endpoint=False)
-    ypoints = np.linspace(0.0, 1.0, ny, endpoint=False)
-    zpoints = np.linspace(0.0, 1.0, nz, endpoint=False)
-
-    # pad the grid with periodic images so (cubic) interpolation works at cell boundaries:
-    xpoints_padded = np.concatenate([xpoints[-1:] - 1.0, xpoints, xpoints[:1] + 1.0])
-    ypoints_padded = np.concatenate([ypoints[-1:] - 1.0, ypoints, ypoints[:1] + 1.0])
-    zpoints_padded = np.concatenate([zpoints[-1:] - 1.0, zpoints, zpoints[:1] + 1.0])
-
-    padded = np.concatenate(
-        [smoothed_potential[-1:, :, :], smoothed_potential, smoothed_potential[:1, :, :]], axis=0
-    )
-    padded = np.concatenate([padded[:, -1:, :], padded, padded[:, :1, :]], axis=1)
-    padded = np.concatenate([padded[:, :, -1:], padded, padded[:, :, :1]], axis=2)
-
-    # TODO: Will want to revisit this implementation; currently quite slow with cubic interpolation, but
-    # dropping to linear significantly worsens accuracy...
-    interpolator = RegularGridInterpolator(
-        (xpoints_padded, ypoints_padded, zpoints_padded),
-        padded,
-        method="cubic",  # 'linear' is faster, but 'cubic' is more accurate for interpolation
-        bounds_error=True,
-    )
     if frac_coords is None:
-        frac_coords = np.mod(volumetric_data.structure.frac_coords, 1.0)
+        frac_coords = volumetric_data.structure.frac_coords
 
-    return interpolator(frac_coords)
+    # ``map_coordinates`` takes coordinates in grid-index space, and ``"grid-wrap"`` applies the
+    # periodic boundary conditions in both the cubic B-spline prefilter and the evaluation, so no
+    # manual padding is needed and coordinates outside the cell wrap around. Cubic (rather than
+    # linear) interpolation is needed for accuracy here; ``scipy.ndimage`` is used rather than
+    # ``scipy.interpolate.RegularGridInterpolator(method="cubic")`` as the latter builds a spline
+    # over the whole grid for each call (~30x slower for a typical supercell) and its padded,
+    # not-a-knot boundary is also less accurate here -- it misses sites lying exactly on grid points
+    # by ~1e-7, which this reproduces exactly:
+    return map_coordinates(
+        smoothed_potential, (frac_coords * volumetric_data.dim).T, order=3, mode="grid-wrap"
+    )
 
 
 def _resolve_calc_output_path(path: PathLike) -> PathLike:
