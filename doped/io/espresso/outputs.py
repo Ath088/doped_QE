@@ -462,10 +462,12 @@ def get_atomic_site_potentials(volumetric_data_path: PathLike | VolumetricData, 
     lattice = volumetric_data.structure.lattice
 
     reci_latt = lattice.reciprocal_lattice
-    # integer Miller indices along each reciprocal axis, FFT-ordered:
-    nx_idx = np.roll(np.arange(-nx // 2, nx // 2, 1, dtype=int), int(nx // 2))
-    ny_idx = np.roll(np.arange(-ny // 2, ny // 2, 1, dtype=int), int(ny // 2))
-    nz_idx = np.roll(np.arange(-nz // 2, nz // 2, 1, dtype=int), int(nz // 2))
+    # integer Miller indices along each reciprocal axis, in the same order as ``np.fft.fftn`` output.
+    # ``fftfreq(n, 1/n)`` is used rather than a hand-rolled ladder because the latter is wrong for odd
+    # ``n``: Python floors negative division, so ``arange(-n//2, n//2)`` runs -(n+1)/2 ... (n-1)/2 - 1
+    # for odd ``n``, giving the wrong sign and magnitude at the Nyquist-most bin (e.g. -18 rather than
+    # +17 for n = 35, i.e. |G|^2 12% too large there). Identical for even ``n``:
+    nx_idx, ny_idx, nz_idx = (np.fft.fftfreq(n, 1 / n) for n in (nx, ny, nz))
 
     Nx, Ny, Nz = np.meshgrid(nx_idx, ny_idx, nz_idx, indexing="ij")
     # G = n1*b1 + n2*b2 + n3*b3; compute |G|^2 using the reciprocal metric tensor to correctly handle

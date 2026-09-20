@@ -1,8 +1,9 @@
 """
 Tests for the ``doped.io`` calculator input/output framework.
 
-This includes ``CalculationOutputs``, calculator dispatch, and the deprecation
-shims for pre-``doped.io`` import paths.
+This includes ``CalculationOutputs``, calculator dispatch, site-potential
+sampling from volumetric outputs, and the deprecation shims for pre-``doped.io``
+import paths.
 """
 
 import os
@@ -11,10 +12,13 @@ import warnings
 
 import numpy as np
 import pytest
+from pymatgen.core import Lattice, Structure
 from pymatgen.electronic_structure.core import Spin
+from pymatgen.io.vasp import VolumetricData
 from test_utils import vasp_data_dir
 
 from doped.io import get_calculation_outputs
+from doped.io.espresso.outputs import get_atomic_site_potentials
 from doped.io.outputs import nelect_from_eigenvalues
 
 
@@ -323,3 +327,46 @@ class DeprecationShimsTestCase(unittest.TestCase):
 
         with pytest.raises(AttributeError):
             _ = doped.utils.parsing.definitely_not_a_real_attribute
+
+
+class SitePotentialSmearingTestCase(unittest.TestCase):
+    """
+    Tests for the Gaussian-smeared atomic-site potentials sampled from
+    volumetric potential outputs (``pp.x`` ``.cube``, VASP ``LOCPOT``), used
+    for the eFNV finite-size charge correction.
+    """
+
+    def test_smearing_matches_analytic_plane_wave_on_odd_grid(self):
+        """
+        Smearing a single plane wave must scale it by exactly
+        ``exp(-beta^2 |G|^2 / 2)``, on odd FFT grids as well as even ones.
+
+        ``n = 35`` with ``h = 17`` places the wave in the Nyquist-most
+        frequency bin, which is the one (and only) bin where an
+        ``arange(-n//2, n//2)`` frequency ladder assigns the wrong Miller
+        index for odd ``n`` (``-18`` rather than ``+17``, i.e. ``|G|^2`` 12%
+        too large), giving a site potential ~23% too small here.
+        """
+        n, h, a, beta = 35, 17, 10.0, 0.3  # odd grid; Nyquist-most bin; cubic cell (Å); beta (Å)
+        structure = Structure(Lattice.cubic(a), ["H"], [[0.0, 0.0, 0.0]])
+        wave = np.cos(2 * np.pi * h * np.arange(n) / n)  # varies along the first lattice vector only
+        data = np.broadcast_to(wave[:, None, None], (n, n, n)).copy()
+
+        volumetric_data = VolumetricData(structure, {"total": data})
+        # the sampled potentials are negated, for the ``doped``/``pydefect`` eFNV sign convention:
+        site_potential = get_atomic_site_potentials(volumetric_data, beta=beta)["site_potentials"][0]
+
+        # ``rtol`` is set by the cubic interpolation onto the site (~2e-6 here); the wrong Miller
+        # index would shift the result by ~23%, i.e. three orders of magnitude more:
+        assert np.isclose(site_potential, -np.exp(-0.5 * beta**2 * (2 * np.pi * h / a) ** 2), rtol=1e-4)
+
+    def test_even_grid_frequencies_unchanged(self):
+        """
+        The previous ``arange``-based frequency ladder was only wrong for odd
+        grid dimensions, so no even-grid (e.g. VASP ``LOCPOT``) potentials or
+        reference values move with the switch to ``np.fft.fftfreq``.
+        """
+        for n in (2, 8, 40, 96):
+            assert np.array_equal(
+                np.fft.fftfreq(n, 1 / n), np.roll(np.arange(-n // 2, n // 2, 1, dtype=int), n // 2)
+            )
