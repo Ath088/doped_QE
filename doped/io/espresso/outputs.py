@@ -1,5 +1,6 @@
 """
-Quantum ESPRESSO (``pw.x`` and pp.x(.cube files)) calculation output parsing for ``doped``.
+Quantum ESPRESSO (``pw.x`` and pp.x(.cube files)) calculation output parsing
+for ``doped``.
 """
 
 import contextlib
@@ -29,9 +30,7 @@ from doped.io.vasp.outputs import (  # ``LOCPOT``/|Vasprun| helpers, reused for 
 )
 
 BOHR_TO_ANGSTROM = 0.529177
-_FALLBACK_SMEARING_WIDTH = 0.5  # bohr; for elements missing from ``PAW_COMPENSATION_RADII``
 
-# kept dense below; ``ruff format`` would otherwise give 83 lines of lookup table:
 # fmt: off
 PAW_COMPENSATION_RADII: dict[str, float] = {
     "H": 0.2846, "He": 0.4743, "Li": 0.6325, "Be": 0.4743,
@@ -59,36 +58,18 @@ PAW_COMPENSATION_RADII: dict[str, float] = {
 # fmt: on
 """
 Gaussian compensation-charge radii (``rc``, in bohr) of the default ``GPAW``
-PAW datasets (``gpaw-data`` 1.1.0, as shipped with ``GPAW`` 25.7.0), read from
-``gpaw.setup.create_setup(symbol).data.shape_function`` (all of type
-``"gauss"``).
+PAW datasets (``gpaw-data`` 1.1.0).
 
-These are used directly as the default per-element Gaussian smearing width
-when sampling atomic-site potentials from a volumetric potential file, i.e.
+These are used directly as the default per-element Gaussian smearing width when
+sampling atomic site potentials from a volumetric potential file, i.e.
 ``beta = rc`` (see :func:`get_atomic_site_potentials`). Note that it is
 ``rc / sqrt(2)`` which exactly reproduces ``GPAW``'s own compensation-charge
 weighting (its shape function is ``exp(-(r/rc)^2)``, i.e. ``exp(-G^2 rc^2/4)``
-in reciprocal space), but the quantity being matched here is the *core*
-electrostatic potential as reported by VASP's ``OUTCAR`` and expected by
-``pydefect``'s eFNV, which is a wider average; ``beta = rc`` matches that
-better, measurably so on both systems tested (see below).
-
-The radii are fixed when a PAW dataset is constructed, rather than being
-runtime choices, and are XC-independent and near-independent of the valence
-choice (~3% between variants of the same element), so they transfer between
-codes. They span 0.28-0.79 bohr over the 83 tabulated elements, so no single
-global width serves all of them -- but the resulting eFNV correction is
-insensitive to a ±25% error in ``beta`` (<0.06 eV), so a tabulated value is
-accurate enough and the augmentation radii do not need parsing from the
-pseudopotentials at runtime.
-
-Measured against the two cross-code references available: the potential
-alignment from VASP ``OUTCAR`` core potentials on the CdTe test data (+2.0 mV
-Cd, +0.2 mV Te, vs +5.0/+2.8 mV for ``rc / sqrt(2)``), and the eFNV corrections
-for Mg_O in MgO parsed from espresso cubes against their VASP counterparts
-(mean |difference| 4.2 meV, vs 9.9 meV for ``rc / sqrt(2)`` and 7.1 meV for the
-previous global 0.5 bohr).
+in reciprocal space), but the quantity being matched here is the core
+electrostatic potential (following the VASP convention, as expected by
+``pydefect``'s eFNV implementation), which is a wider average; ``beta = rc``.
 """
+_FALLBACK_SMEARING_WIDTH = float(np.median(list(PAW_COMPENSATION_RADII.values())))  # bohr, ~0.66
 
 
 CALC_OUTPUT_MASK = ("espresso.xml", ".xml", "espresso.xml.gz", ".xml.gz")
@@ -114,17 +95,19 @@ FILE_PARSING_ACTIONS: dict[str, str] = {
     PROJECTIONS_FILE: _PROJECTIONS_PARSING_ACTION,
 }
 """
-``{file pattern: action description}`` for the files parsed by this backend, used in the "multiple
-matching files found" warnings emitted by ``_multiple_files_warning`` (part of the ``doped.io``
-backend protocol). Without an entry for each pattern, these warnings error out rather than warn.
+``{file pattern: action description}`` for the files parsed by this backend,
+used in the "multiple matching files found" warnings emitted by
+``_multiple_files_warning`` (part of the ``doped.io`` backend protocol).
+
+Without an entry for each pattern, these warnings error out rather than warn.
 """
 
 
 def _make_pwxml_property_settable(prop_name: str) -> None:
     """
     Replace a read-only ``PWxml`` property with a read-write version, storing
-    any assigned value in a hidden instance attribute which then
-    short-circuits the original getter.
+    any assigned value in a hidden instance attribute which then short-circuits
+    the original getter.
 
     Calculator-agnostic ``doped`` code nulls out the eigenvalue arrays on
     parsed run objects (``raw["vasprun"]``) once used, to reduce memory demand
@@ -160,18 +143,13 @@ for _prop_name in ("projected_eigenvalues", "projected_magnetization"):
     _make_pwxml_property_settable(_prop_name)
 
 
-
-
-
 def _file_parsing_action(file_type: PathLike) -> str:
     """
-    The action description for ``file_type`` (see :data:`FILE_PARSING_ACTIONS`),
-    for use in ``_multiple_files_warning``, with a generic fallback for any
-    unlisted file type.
+    The action description for ``file_type`` (see
+    :data:`FILE_PARSING_ACTIONS`), for use in ``_multiple_files_warning``, with
+    a generic fallback for any unlisted file type.
     """
     return FILE_PARSING_ACTIONS.get(str(file_type), "Need to parse the calculation outputs.")
-
-
 
 
 def get_espresso_run(espressorun_path: PathLike, **kwargs) -> PWxml:
@@ -205,7 +183,7 @@ def get_espresso_run(espressorun_path: PathLike, **kwargs) -> PWxml:
     )  # `message` only needs to match start of message
     default_kwargs = {"parse_dos": False}  # ``PWxml`` has no ``exception_on_bad_xml``; see below
     default_kwargs.update(kwargs)
-    #TODO: Devise a test for working with projected eigenvalues: Currently untested with doped examples.
+    # TODO: Devise a test for working with projected eigenvalues: Currently untested with doped examples.
 
     try:
         vasprun = PWxml(find_archived_fname(espressorun_path), **default_kwargs)
@@ -254,8 +232,8 @@ def _parse_run_and_poss_projwfc(
     **kwargs,
 ):
     r"""
-    :func:`get_espresso_run` plus orbital projections where available; the espresso
-    analogue of ``_parse_vr_and_poss_procar`` for VASP.
+    :func:`get_espresso_run` plus orbital projections where available; the
+    espresso analogue of ``_parse_vr_and_poss_procar`` for VASP.
 
     ``pw.x`` writes no orbital projections to its XML, so these come from a
     separate ``projwfc.x`` ``filproj`` output -- the espresso analogue of VASP's
@@ -266,7 +244,6 @@ def _parse_run_and_poss_projwfc(
     searched for here and parsed with ``PWxml._parse_projected_eigen``, which
     also handles the paired ``.projwfc_down`` channel of spin-polarised
     (``lsda``) calculations and validates the projections against the XML.
-
     """
     projwfc = None
     if output_path is None:
@@ -277,16 +254,13 @@ def _parse_run_and_poss_projwfc(
     )
 
     try:
-        vr = get_espresso_run(
-            vr_path, parse_projected_eigen=parse_projected_eigen is not False, **kwargs
-        )
+        vr = get_espresso_run(vr_path, parse_projected_eigen=parse_projected_eigen is not False, **kwargs)
 
     except Exception as vr_exc:  # retry without projections
         vr = get_espresso_run(vr_path, parse_projected_eigen=False, **kwargs)
         failed_eig_parsing_warning_message += f", got error:\n{vr_exc}"
 
     if parse_projected_eigen is not False and getattr(vr, "atomic_states", None) is None:
-
         filproj_path, multiple = _io_utils._get_output_files_and_check_if_multiple(
             PROJECTIONS_FILE, output_path
         )
@@ -448,8 +422,8 @@ def get_magnetization_from_espressorun(pwxml: PWxml) -> int | float | np.ndarray
     r"""
     Determine the total magnetization of an espresso calculation, in Bohr
     magnetons (i.e. electronic units -- the number of unpaired electrons, as
-    used by ``VASP`` and by ``doped``\'s spin-degeneracy analysis); the espresso
-    analogue of ``get_magnetization_from_vasprun`` for VASP.
+    used by ``VASP`` and by ``doped``\'s spin-degeneracy analysis); the
+    espresso analogue of ``get_magnetization_from_vasprun`` for VASP.
 
     - ``total``: the scalar magnetization of a collinear (``lsda``)
       calculation.
@@ -491,21 +465,22 @@ def get_atomic_site_potentials(
     volumetric_data_path: PathLike | VolumetricData, beta: float | dict[str, float] | None = None
 ):
     """
-    Calculate the Gaussian-averaged site potentials, for the Kumagai (eFNV) finite-size charge correction.
-
+    Calculate the Gaussian-averaged site potentials, for the Kumagai (eFNV)
+    finite-size charge correction.
 
     Args:
         volumetric_data_path (PathLike | VolumetricData):
             Path to a ``pp.x`` ``.cube(.gz)`` file or a VASP ``LOCPOT``, or an
             already-parsed ``VolumetricData`` object.
         beta (float | dict[str, float]):
-            Gaussian broadening width at the atomic sites, **in Å** for all
-            input types. If ``None`` (default), a per-element width is used
-            for each site: ``rc``, that element's PAW compensation-charge
-            radius (:data:`PAW_COMPENSATION_RADII`).
-            Can be set to a single float, used for every site, or to a
-            ``{element symbol: width}`` dict, with any elements not given
-            taking the default above.
+            Gaussian broadening width at the atomic sites, in Å. If ``None``
+            (default), a per-element width is used for each site: ``rc``, that
+            element's PAW compensation-charge radius
+            (:data:`PAW_COMPENSATION_RADII`). Can be set to a single float
+            (used for every site) or to a ``{element symbol: width}`` dict,
+            with any elements not given taking the default ``rc`` value.
+            Elements missing from the table take the median tabulated radius
+            (~0.66 bohr = 0.35 Å), with a warning.
 
     Returns:
         dict:
@@ -527,11 +502,7 @@ def get_atomic_site_potentials(
     lattice = volumetric_data.structure.lattice
 
     reci_latt = lattice.reciprocal_lattice
-    # integer Miller indices along each reciprocal axis, in the same order as ``np.fft.fftn`` output.
-    # ``fftfreq(n, 1/n)`` is used rather than a hand-rolled ladder because the latter is wrong for odd
-    # ``n``: Python floors negative division, so ``arange(-n//2, n//2)`` runs -(n+1)/2 ... (n-1)/2 - 1
-    # for odd ``n``, giving the wrong sign and magnitude at the Nyquist-most bin (e.g. -18 rather than
-    # +17 for n = 35, i.e. |G|^2 12% too large there). Identical for even ``n``:
+    # integer Miller indices along each reciprocal axis, in the same order as ``np.fft.fftn`` output
     nx_idx, ny_idx, nz_idx = (np.fft.fftfreq(n, 1 / n) for n in (nx, ny, nz))
 
     Nx, Ny, Nz = np.meshgrid(nx_idx, ny_idx, nz_idx, indexing="ij")
@@ -540,12 +511,12 @@ def get_atomic_site_potentials(
     recip_matrix = reci_latt.matrix  # rows are b1, b2, b3
     metric = recip_matrix @ recip_matrix.T  # G_ij = bi . bj
     g2 = (
-            Nx ** 2 * metric[0, 0]
-            + Ny ** 2 * metric[1, 1]
-            + Nz ** 2 * metric[2, 2]
-            + 2 * Nx * Ny * metric[0, 1]
-            + 2 * Nx * Nz * metric[0, 2]
-            + 2 * Ny * Nz * metric[1, 2]
+        Nx**2 * metric[0, 0]
+        + Ny**2 * metric[1, 1]
+        + Nz**2 * metric[2, 2]
+        + 2 * Nx * Ny * metric[0, 1]
+        + 2 * Nx * Nz * metric[0, 2]
+        + 2 * Ny * Nz * metric[1, 2]
     )
     # espresso cubes give the potential in Ry; VASP LOCPOTs give it in eV already. ``beta`` is in Å
     # for both, so the broadening below needs no unit handling (``g2`` is in Å^-2):
@@ -585,7 +556,8 @@ def _site_smearing_widths(atoms: list[str], beta: float | dict[str, float] | Non
             ``{element symbol: width (Å)}`` dict setting the width for some
             or all elements. Elements not given -- and every element if
             ``None`` -- take the default ``rc``, from
-            :data:`PAW_COMPENSATION_RADII`.
+            :data:`PAW_COMPENSATION_RADII`, or its median (with a warning)
+            for elements absent from that table.
 
     Returns:
         np.ndarray: The smearing width (Å) for each site.
@@ -593,26 +565,20 @@ def _site_smearing_widths(atoms: list[str], beta: float | dict[str, float] | Non
     if beta is not None and not isinstance(beta, dict):
         return np.full(len(atoms), float(beta))
 
-    # note no warning for ``beta`` keys absent from ``atoms``: the same dict is used for the bulk and
-    # every defect supercell, so an element missing from one of them is normal (e.g. the substituting
-    # species of a substitution defect is not in the bulk):
+    # note no warning for ``beta`` keys absent from ``atoms``: the same dict is used for the bulk and every
+    # defect supercell, so an element missing from `one` of them is normal:
     beta = beta or {}
     defaulted = {atom for atom in atoms if atom not in beta}
     if missing := sorted(defaulted.difference(PAW_COMPENSATION_RADII)):
         warnings.warn(
-            f"No PAW compensation-charge radius is tabulated for {missing}, so a "
-            f"{_FALLBACK_SMEARING_WIDTH} bohr Gaussian smearing width is used for these sites when "
-            f"sampling the atomic-site potentials. Set `beta` explicitly to override this."
+            f"No PAW compensation-charge radius is tabulated for {missing}, so the median tabulated "
+            f"radius ({_FALLBACK_SMEARING_WIDTH:.2f} bohr) is used as the Gaussian smearing width for "
+            f"these sites when sampling the atomic site potentials. Set `beta` explicitly to override "
+            f"this."
         )
 
     # ``PAW_COMPENSATION_RADII`` is tabulated in bohr (atomic units, as PAW/pseudopotential datasets give
-    # it) while ``beta`` is in Å throughout the public API, so the defaults are converted here. Note that
-    # ``rc`` is used directly, and *not* ``rc/sqrt(2)``: the latter is what exactly reproduces ``GPAW``'s
-    # own compensation-charge weighting (its shape function is ``exp(-(r/rc)^2)``, i.e. ``exp(-G^2rc^2/4)``
-    # in reciprocal space, which is ``exp(-beta^2 G^2/2)`` with ``beta = rc/sqrt(2)``), but the quantity
-    # being matched here is the *core* electrostatic potential as VASP's ``OUTCAR`` reports it and as
-    # ``pydefect``'s eFNV expects, which is a wider average -- empirically ~sqrt(2) wider, on both of the
-    # cross-code references tested (see the ``PAW_COMPENSATION_RADII`` docstring for those numbers):
+    # it) while ``beta`` is in Å throughout the public API, so the defaults are converted here:
     widths = []
     for atom in atoms:
         if atom in beta:
@@ -625,16 +591,14 @@ def _site_smearing_widths(atoms: list[str], beta: float | dict[str, float] | Non
     return np.array(widths)
 
 
-
-
 def interpolate_potentials_at_atomic_sites(
     smoothed_potential: np.ndarray,
     volumetric_data: VolumetricData,
     frac_coords: np.ndarray | None = None,
 ):
     """
-    Interpolate ``smoothed_potential`` (using the ``volumetric_data`` grid) at the
-    atomic sites of its structure.
+    Interpolate ``smoothed_potential`` (using the ``volumetric_data`` grid) at
+    the atomic sites of its structure.
 
     Args:
         smoothed_potential (np.ndarray):
@@ -655,17 +619,9 @@ def interpolate_potentials_at_atomic_sites(
     if frac_coords is None:
         frac_coords = volumetric_data.structure.frac_coords
 
-    # ``map_coordinates`` takes coordinates in grid-index space, and ``"grid-wrap"`` applies the
-    # periodic boundary conditions in both the cubic B-spline prefilter and the evaluation, so no
-    # manual padding is needed and coordinates outside the cell wrap around. Cubic (rather than
-    # linear) interpolation is needed for accuracy here; ``scipy.ndimage`` is used rather than
-    # ``scipy.interpolate.RegularGridInterpolator(method="cubic")`` as the latter builds a spline
-    # over the whole grid for each call (~30x slower for a typical supercell) and its padded,
-    # not-a-knot boundary is also less accurate here -- it misses sites lying exactly on grid points
-    # by ~1e-7, which this reproduces exactly:
-    return map_coordinates(
+    return map_coordinates(  # ``"grid-wrap"`` applies PBC
         smoothed_potential, (frac_coords * volumetric_data.dim).T, order=3, mode="grid-wrap"
-    )
+    )  # ``map_coordinates`` takes coord in grid-index space (so multiply by dim and transpose)
 
 
 def _resolve_calc_output_path(path: PathLike) -> PathLike:
@@ -750,13 +706,12 @@ def get_calculation_outputs(
             ``"defect"``), for informative warnings and parsing efficiency
             choices. Default is ``"calculation"``.
         beta (float):
-            Gaussian broadening width (**in bohr** for espresso cubes) used
-            when sampling the atomic-site potentials, only used if
-            ``load_site_potentials``. Default is ``None``; i.e. per-element
-            widths from :data:`PAW_COMPENSATION_RADII`.
+            Gaussian broadening width (in Å) used when sampling the atomic site
+            potentials, only used if ``load_site_potentials``. Default is
+            ``None``; i.e. per-element widths from
+            :data:`PAW_COMPENSATION_RADII`.
         **kwargs:
-            Additional keyword arguments to pass to
-            :func:`get_espresso_run`.
+            Additional keyword arguments to pass to :func:`get_espresso_run`.
 
     Returns:
         CalculationOutputs: The parsed calculation outputs.
@@ -939,7 +894,6 @@ def load_eigenvalue_outputs(
         CalculationOutputs:
             The parsed calculation outputs, with ``projected_eigenvalues``.
     """
-
     pwxml = outputs if isinstance(outputs, PWxml) else None
     projwfc = directory = None
 
@@ -978,16 +932,18 @@ def load_eigenvalue_outputs(
 
     if getattr(pwxml, "atomic_states", None) is None and projwfc is None:
         raise FileNotFoundError(
-            f"No {label} `projwfc.x` `filproj` file (`*{PROJECTIONS_FILE}`) found (and successfully parsed) "
-            f"in path: {path}. Required for eigenvalue analysis! (`pw.x` writes no orbital projections to its XML, so a "
-            f"separate `projwfc.x` calculation is required for eigenvalue analysis with espresso)"
+            f"No {label} `projwfc.x` `filproj` file (`*{PROJECTIONS_FILE}`) found (and successfully "
+            f"parsed) in path: {path}. Required for eigenvalue analysis! (`pw.x` writes no orbital "
+            f"projections to its XML, so a separate `projwfc.x` calculation is required for eigenvalue "
+            f"analysis with espresso)"
         )
 
     return calculation_outputs_from_pwxml(pwxml, projections=projwfc, path=directory or path)
 
 
 HARTREE_TO_RY = 2.0
-#TODO: Add this bulit into pymatgen.io.espresso
+# TODO: Add this built into pymatgen.io.espresso
+
 
 def _compare_qe_input_parameters(
     ref_params: dict,
@@ -998,8 +954,8 @@ def _compare_qe_input_parameters(
     warn: bool = True,
 ) -> list | bool:
     """
-    Check espresso input parameters that can affect energies are consistent between
-    two calculations.  Analogous to ``_compare_incar_tags`` for VASP.
+    Check espresso input parameters that can affect energies are consistent
+    between two calculations.  Analogous to ``_compare_incar_tags`` for VASP.
 
     The ``ref_params`` and ``entry_params`` dicts are the nested parameter
     dicts stored in ``entry.data["qe_input"]`` (i.e. ``PWxml.parameters``).
@@ -1007,7 +963,6 @@ def _compare_qe_input_parameters(
     Returns ``True`` if no critical mismatches, otherwise a list of
     ``(parameter, value_in_entry, value_in_reference)`` tuples.
     """
-
     fatal_qe_params = {
         "ecutwfc": None,
         "ecutrho": None,
@@ -1041,7 +996,7 @@ def _compare_qe_input_parameters(
         flat["ecutwfc"] = ecutwfc * HARTREE_TO_RY if ecutwfc is not None else None
         flat["ecutrho"] = ecutrho * HARTREE_TO_RY if ecutrho is not None else None
         flat["degauss"] = degauss * HARTREE_TO_RY if degauss is not None else None
-        flat["hybrid"] = bool(hybrid)  
+        flat["hybrid"] = bool(hybrid)
         flat["exx_fraction"] = hybrid.get("exx_fraction")
         flat["screening_parameter"] = hybrid.get("screening_parameter")
         qpoint_grid = hybrid.get("qpoint_grid") or {}
@@ -1141,8 +1096,8 @@ def _qe_input_parameters(pwxml_or_parameters) -> dict:
 
 def _get_qe_kpoints_grid(pwxml, actual_kpoints=None) -> list[int] | None:
     """
-    Get the ``[nk1, nk2, nk3]`` Monkhorst-Pack grid used for a espresso calculation,
-    from the ``k_points_IBZ`` input block of its ``.xml`` output.
+    Get the ``[nk1, nk2, nk3]`` Monkhorst-Pack grid used for a espresso
+    calculation, from the ``k_points_IBZ`` input block of its ``.xml`` output.
 
     Args:
         pwxml (``PWxml`` or dict):
@@ -1259,7 +1214,8 @@ def _format_mismatching_qe_input_warning(
     mismatching_qe_input_warnings: list[tuple[str, set]],
 ) -> str:
     """
-    Generate a formatted warning string for mismatching espresso input parameters.
+    Generate a formatted warning string for mismatching espresso input
+    parameters.
     """
     mismatching_tags_name_list_dict = {
         tuple(sorted(mismatching_set)): sorted(
@@ -1281,7 +1237,6 @@ def _get_pwxml_dict_without_heavy_arrays(pwxml: PWxml) -> dict:
     Get the ``PWxml.as_dict()`` representation, with the (large) projected
     eigenvalue/magnetization and atomic-state data excluded (as these are not
     needed in later stages of ``doped`` analysis workflows).
-
     """
     attributes_to_cut = [
         "projected_eigenvalues",
@@ -1320,16 +1275,13 @@ def get_planar_averaged_potentials(
             The planar-averaged potentials, as ``{axis index (str): 1D
             array}``.
     """
-    cube_path, multiple = _io_utils._get_output_files_and_check_if_multiple(
-        PLANAR_POTENTIALS_FILE, path
-    )
+    cube_path, multiple = _io_utils._get_output_files_and_check_if_multiple(PLANAR_POTENTIALS_FILE, path)
     if multiple and not quiet:
         _multiple_files_warning(
             PLANAR_POTENTIALS_FILE,
             path,
             cube_path,
-            action="parse the electrostatic potential and compute the FNV charge "
-            "correction.",
+            action="parse the electrostatic potential and compute the FNV charge correction.",
             dir_type=dir_type,
         )
     cube = get_cube(cube_path)
@@ -1353,7 +1305,6 @@ def get_site_potentials(
     Get the atomic-site electrostatic potentials for the calculation in
     ``path``, needed for Kumagai (eFNV) finite-size charge corrections.
 
-
     Args:
         path (PathLike):
             Path to the calculation directory.
@@ -1372,9 +1323,9 @@ def get_site_potentials(
             Accepted for backend-protocol compatibility and otherwise
             **unused** -- see the note below. Default is ``None``.
         beta (float):
-            Gaussian broadening width (**in bohr**) used when sampling the
-            site potentials. Default is ``None``; i.e. per-element widths
-            from :data:`PAW_COMPENSATION_RADII`. Can be set through
+            Gaussian broadening width (in Å) used when sampling the site
+            potentials. Default is ``None``; i.e. per-element widths from
+            :data:`PAW_COMPENSATION_RADII`. Can be set through
             :class:`~doped.parsing.DefectsParser` /
             :class:`~doped.parsing.DefectParser`, which forward it here.
 
@@ -1397,8 +1348,7 @@ def get_site_potentials(
             SITE_POTENTIALS_FILE,
             path,
             cube_path,
-            action="parse the electrostatic potential and compute the Kumagai (eFNV) charge "
-            "correction.",
+            action="parse the electrostatic potential and compute the Kumagai (eFNV) charge correction.",
             dir_type=dir_type,
         )
 
@@ -1449,10 +1399,9 @@ def get_potentials_from_input(
             Accepted for protocol compatibility and **ignored**; see
             ``entry_energy``.
         beta (float):
-            Gaussian broadening width used when sampling the atomic-site
-            potentials (only used for ``potential_type="site"``); **in bohr**
-            for ``.cube`` inputs and **in Å** for ``VolumetricData`` inputs.
-            Default is ``None``; i.e. per-element widths from
+            Gaussian broadening width in Å, used when sampling the atomic site
+            potentials (only used for ``potential_type="site"``). Default is
+            ``None``; i.e. per-element widths from
             :data:`PAW_COMPENSATION_RADII`.
 
     Returns:
@@ -1528,7 +1477,6 @@ def check_run_compatibility(
     """
     run_metadata: dict[str, Any] = {}
     for label, outputs in [("defect", defect_outputs), ("bulk", bulk_outputs)]:
-
         is_outputs = isinstance(outputs, CalculationOutputs)
         stored: dict = (outputs.run_metadata or {}) if is_outputs else {}
         pwxml = (outputs.raw or {}).get("pwxml") if is_outputs else outputs
@@ -1549,11 +1497,8 @@ def check_run_compatibility(
             stored.get("pseudo_filenames") or getattr(pwxml, "potcar_spec", None) or []
         )
         run_metadata[f"{label}_kpoints"] = list(kpoints) if kpoints is not None else None
-        run_metadata[f"{label}_kpoints_shift"] = (
-            list(kpoints_shift) if kpoints_shift is not None else None
-        )
+        run_metadata[f"{label}_kpoints_shift"] = list(kpoints_shift) if kpoints_shift is not None else None
         run_metadata[f"{label}_actual_kpoints"] = actual_kpoints
-
 
         if pwxml is not None:
             try:
@@ -1718,7 +1663,6 @@ def get_fermi_dos_from_espresso_dos(
             "supercell `espresso.xml`) or `structure` directly."
         )
 
-
     if nelecs is None and isinstance(bulk_pwxml, PWxml):
         nelecs = bulk_pwxml.nelec
 
@@ -1726,8 +1670,9 @@ def get_fermi_dos_from_espresso_dos(
         warnings.warn(
             "The number of valence electrons (`nelec`) could not be determined (no `bulk_pwxml` or "
             "`nelecs` is provided), so the `FermiDos` will normalise the DOS to the all-electron count "
-            "from the structure composition. This results in the wrong carrier concentrations."
-            " Please provide `bulk_pwxml` (the bulk supercell `espresso.xml`) or set `nelecs` explicitly (Quantum ESPRESSO's `nelec`)."
+            "from the structure composition. This results in the wrong carrier concentrations. "
+            "Please provide `bulk_pwxml` (the bulk supercell `espresso.xml`) or set `nelecs` explicitly "
+            "(Quantum ESPRESSO's `nelec`)."
         )
 
     return FermiDos(
@@ -1846,8 +1791,8 @@ def get_fermi_dos(
 
 def get_competing_phase_entry(path: PathLike, **kwargs) -> ComputedStructureEntry:
     """
-    Parse the outputs of a competing phase espresso calculation
-    in ``path`` to a ``pymatgen`` ``ComputedStructureEntry``.
+    Parse the outputs of a competing phase espresso calculation in ``path`` to
+    a ``pymatgen`` ``ComputedStructureEntry``.
 
     Args:
         path (PathLike):
@@ -1876,7 +1821,7 @@ def get_competing_phase_entry(path: PathLike, **kwargs) -> ComputedStructureEntr
     entry = pwxml.get_computed_entry(entry_id=f"pwxml-{path}")
     unique_symbols = sorted(set(pwxml.atomic_symbols))
     kpoints_grid = _get_qe_kpoints_grid(pwxml)
-    summary_dict = {}
+    summary_dict: dict[str, Any] = {}  # band gap (float | None) and magnetisation (float | ndarray)
     with contextlib.suppress(Exception):  # non-essential properties; can fail with incomplete XML
         band_gap, cbm, *_ = pwxml.eigenvalue_band_properties
         # guard against infinite band gaps (common with band-gap materials in espresso; no empty

@@ -19,7 +19,12 @@ from pymatgen.io.vasp import VolumetricData
 from test_utils import vasp_data_dir
 
 from doped.io import get_calculation_outputs
-from doped.io.espresso.outputs import BOHR_TO_ANGSTROM, PAW_COMPENSATION_RADII, get_atomic_site_potentials
+from doped.io.espresso.outputs import (
+    _FALLBACK_SMEARING_WIDTH,
+    BOHR_TO_ANGSTROM,
+    PAW_COMPENSATION_RADII,
+    get_atomic_site_potentials,
+)
 from doped.io.outputs import nelect_from_eigenvalues
 
 
@@ -339,8 +344,8 @@ class SitePotentialSmearingTestCase(unittest.TestCase):
 
     def test_smearing_matches_analytic_plane_wave_on_odd_grid(self):
         """
-        Smearing a single plane wave must scale it by exactly
-        ``exp(-beta^2 |G|^2 / 2)``, on odd FFT grids as well as even ones.
+        Smearing a single plane wave must scale it by exactly ``exp(-beta^2
+        |G|^2 / 2)``, on odd FFT grids as well as even ones.
 
         ``n = 35`` with ``h = 17`` places the wave in the Nyquist-most
         frequency bin, which is the one (and only) bin where an
@@ -377,8 +382,10 @@ class SitePotentialSmearingTestCase(unittest.TestCase):
         With ``beta=None`` (the default), each site must be sampled from the
         grid smeared with *its own* element's width (``rc``, from
         ``PAW_COMPENSATION_RADII``), with elements missing from that table
-        falling back to 0.5 bohr with a warning.
+        falling back to the median tabulated radius with a warning.
         """
+        assert np.isclose(_FALLBACK_SMEARING_WIDTH, np.median(list(PAW_COMPENSATION_RADII.values())))
+        assert 0.6 < _FALLBACK_SMEARING_WIDTH < 0.7  # bohr; within 25% of the heavy elements it serves
         a, n = 8.0, 20
         structure = Structure(
             Lattice.cubic(a),
@@ -403,7 +410,7 @@ class SitePotentialSmearingTestCase(unittest.TestCase):
         for width_bohr, sites in [
             (PAW_COMPENSATION_RADII["Cd"], [0, 2]),
             (PAW_COMPENSATION_RADII["Te"], [1]),
-            (0.5, [3]),  # the fallback width, for Tc
+            (_FALLBACK_SMEARING_WIDTH, [3]),  # the fallback width (table median), for Tc
         ]:
             single = get_atomic_site_potentials(volumetric_data, beta=width_bohr * BOHR_TO_ANGSTROM)[
                 "site_potentials"
@@ -436,9 +443,9 @@ class SitePotentialSmearingTestCase(unittest.TestCase):
     def test_beta_units_and_dict_input(self):
         """
         ``beta`` is in Å for every input type (``.cube`` potentials are in Ry
-        and their geometry in bohr, but ``beta`` is not), and can be given as
-        a ``{element symbol: width}`` dict, with unlisted elements taking
-        their tabulated default.
+        and their geometry in bohr, but ``beta`` is not), and can be given as a
+        ``{element symbol: width}`` dict, with unlisted elements taking their
+        tabulated default.
         """
         import tempfile
 

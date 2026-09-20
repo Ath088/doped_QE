@@ -1,15 +1,9 @@
 """
 Tests for Quantum ESPRESSO (``pw.x``/``pp.x``) defect parsing and charge
 corrections, using the MgO example data in ``examples/MgO_qe``.
-
-The atomic-site potentials which the Kumagai (eFNV) correction is built from
-are sampled from a ``pp.x`` ``.cube`` of the electrostatic potential, smeared
-with a per-element Gaussian; the reference these are checked against is the
-corresponding VASP calculation of the same defects, whose site potentials come
-from ``OUTCAR`` core levels and so need no smearing.
 """
 
-# TODO: This covers the correction values only. The remaining espresso tests live in
+# TODO: This covers the correction values only, at present. The remaining espresso tests live in
 #  ``tests/test_quantum_espresso.py`` and ``tests/test_quantum_espresso_anisotropic.py`` on the
 #  ``atharva_doped_QE`` branch and still need porting. Note that file is stale (last updated
 #  2026-04-17, while ``examples/MgO_qe`` was reorganised into ``Defects/``/``Unrelaxed/`` subfolders on
@@ -60,8 +54,8 @@ VASP_CORRECTIONS = {"Mg_O_+1": 0.1988, "Mg_O_+2": 0.7233, "Mg_O_+3": 1.5717, "Mg
 
 def _parse_mgo_qe(**kwargs) -> dict:
     """
-    Parse the MgO espresso defect calculations, returning
-    ``{name: kumagai correction (eV)}``.
+    Parse the MgO espresso defect calculations, returning ``{name: kumagai
+    correction (eV)}``.
     """
     defects_dir = os.path.join(os.path.dirname(__file__), "../examples/MgO_qe/Defects")
     with warnings.catch_warnings():  # projected-magnetisation warning is not under test here
@@ -99,9 +93,9 @@ class EspressoMgOCorrectionsTestCase(unittest.TestCase):
     def test_agreement_with_vasp(self):
         """
         The espresso and VASP corrections are for the same defects in the same
-        material, so they should agree; this is the only check that the
-        smeared site potentials are right which does not go through the code
-        that produces them.
+        material, so they should agree; this is the only check that the smeared
+        site potentials are right which does not go through the code that
+        produces them.
         """
         diffs = {name: abs(self.corrections[name] - ref) for name, ref in VASP_CORRECTIONS.items()}
         assert np.mean(list(diffs.values())) < 0.006, diffs
@@ -118,8 +112,8 @@ class EspressoMgOCorrectionsTestCase(unittest.TestCase):
 
 class EspressoBetaTestCase(unittest.TestCase):
     """
-    The Gaussian smearing width, ``beta``, which defaults to each element's
-    PAW compensation-charge radius.
+    The Gaussian smearing width, ``beta``, which defaults to each element's PAW
+    compensation-charge radius.
     """
 
     def test_explicit_global_beta(self):
