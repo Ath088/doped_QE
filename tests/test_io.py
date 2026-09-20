@@ -13,12 +13,13 @@ import warnings
 import numpy as np
 import pytest
 from pymatgen.core import Lattice, Structure
+from pymatgen.core.units import Ry_to_eV, bohr_to_angstrom
 from pymatgen.electronic_structure.core import Spin
 from pymatgen.io.vasp import VolumetricData
 from test_utils import vasp_data_dir
 
 from doped.io import get_calculation_outputs
-from doped.io.espresso.outputs import get_atomic_site_potentials
+from doped.io.espresso.outputs import BOHR_TO_ANGSTROM, PAW_COMPENSATION_RADII, get_atomic_site_potentials
 from doped.io.outputs import nelect_from_eigenvalues
 
 
@@ -370,3 +371,104 @@ class SitePotentialSmearingTestCase(unittest.TestCase):
             assert np.array_equal(
                 np.fft.fftfreq(n, 1 / n), np.roll(np.arange(-n // 2, n // 2, 1, dtype=int), n // 2)
             )
+
+    def test_per_element_smearing_widths(self):
+        """
+        With ``beta=None`` (the default), each site must be sampled from the
+        grid smeared with *its own* element's width (``rc``, from
+        ``PAW_COMPENSATION_RADII``), with elements missing from that table
+        falling back to 0.5 bohr with a warning.
+        """
+        a, n = 8.0, 20
+        structure = Structure(
+            Lattice.cubic(a),
+            ["Cd", "Te", "Cd", "Tc"],  # Tc is not in ``PAW_COMPENSATION_RADII``
+            [[0, 0, 0], [0.5, 0.5, 0.5], [0.25, 0.5, 0.75], [0.75, 0.25, 0.5]],
+        )
+        axis = np.arange(n) / n
+        data = (  # deterministic, non-separable, with enough structure to resolve the widths apart
+            np.sin(2 * np.pi * axis)[:, None, None]
+            * np.cos(6 * np.pi * axis)[None, :, None]
+            * np.sin(8 * np.pi * axis)[None, None, :]
+            + np.cos(4 * np.pi * (axis[:, None, None] + axis[None, :, None] + axis[None, None, :]))
+        )
+        volumetric_data = VolumetricData(structure, {"total": data})
+
+        with pytest.warns(
+            UserWarning, match=r"No PAW compensation-charge radius is tabulated for \['Tc'\]"
+        ):
+            per_element = get_atomic_site_potentials(volumetric_data)["site_potentials"]
+
+        # widths are tabulated in bohr, and so converted here for this (eV, Å) ``VolumetricData`` input:
+        for width_bohr, sites in [
+            (PAW_COMPENSATION_RADII["Cd"], [0, 2]),
+            (PAW_COMPENSATION_RADII["Te"], [1]),
+            (0.5, [3]),  # the fallback width, for Tc
+        ]:
+            single = get_atomic_site_potentials(volumetric_data, beta=width_bohr * BOHR_TO_ANGSTROM)[
+                "site_potentials"
+            ]
+            assert np.allclose(per_element[sites], single[sites], rtol=0, atol=1e-12)
+            others = [i for i in range(len(structure)) if i not in sites]
+            assert not np.any(np.isclose(per_element[others], single[others], rtol=0, atol=1e-12))
+
+    @staticmethod
+    def _cube_file(path, structure, data):
+        """
+        Write ``structure``/``data`` as a Gaussian ``.cube`` file (which uses
+        bohr throughout), for testing the ``.cube`` parsing branch.
+        """
+        matrix = structure.lattice.matrix / bohr_to_angstrom
+        lines = ["test cube", "written by doped's test suite", f"{len(structure)} 0.0 0.0 0.0"]
+        lines += [
+            f"{n} " + " ".join(f"{x:.12f}" for x in vector / n)
+            for n, vector in zip(data.shape, matrix, strict=True)
+        ]
+        lines += [
+            f"{site.specie.Z} 0.0 " + " ".join(f"{x:.12f}" for x in site.coords / bohr_to_angstrom)
+            for site in structure
+        ]
+        flat = data.ravel()  # z fastest, as ``.cube`` requires; 6 values per line by convention
+        lines += [" ".join(f"{v:.12e}" for v in flat[i : i + 6]) for i in range(0, flat.size, 6)]
+        with open(path, "w", encoding="utf-8") as file:
+            file.write("\n".join(lines) + "\n")
+
+    def test_beta_units_and_dict_input(self):
+        """
+        ``beta`` is in Å for every input type (``.cube`` potentials are in Ry
+        and their geometry in bohr, but ``beta`` is not), and can be given as
+        a ``{element symbol: width}`` dict, with unlisted elements taking
+        their tabulated default.
+        """
+        import tempfile
+
+        a, n = 8.0, 8
+        structure = Structure(
+            Lattice.cubic(a), ["Cd", "Te", "Cd"], [[0, 0, 0], [0.5, 0.5, 0.5], [0.25, 0.5, 0.75]]
+        )
+        axis = np.arange(n) / n
+        data = np.cos(2 * np.pi * (axis[:, None, None] + 2 * axis[None, :, None] - axis[None, None, :]))
+        volumetric_data = VolumetricData(structure, {"total": data})
+
+        with tempfile.TemporaryDirectory() as tmpdir:  # same beta must mean the same width for both
+            cube_path = os.path.join(tmpdir, "potential.cube")
+            self._cube_file(cube_path, structure, data)
+            cube = get_atomic_site_potentials(cube_path, beta=0.3)["site_potentials"]
+        locpot_like = get_atomic_site_potentials(volumetric_data, beta=0.3)["site_potentials"]
+        assert np.allclose(cube, Ry_to_eV * locpot_like, rtol=1e-8)  # only the potential units differ
+
+        # a dict sets the width per element, with any not given taking the tabulated default:
+        default = PAW_COMPENSATION_RADII["Te"] * BOHR_TO_ANGSTROM
+        mixed = get_atomic_site_potentials(volumetric_data, beta={"Cd": 0.4})["site_potentials"]
+        for width, sites in [(0.4, [0, 2]), (default, [1])]:
+            single = get_atomic_site_potentials(volumetric_data, beta=width)["site_potentials"]
+            assert np.allclose(mixed[sites], single[sites], rtol=0, atol=1e-12)
+            others = [i for i in range(len(structure)) if i not in sites]
+            assert not np.any(np.isclose(mixed[others], single[others], rtol=0, atol=1e-12))
+
+        # keys for elements absent from the structure are ignored without warning, as the same dict
+        # is used for the bulk and every defect supercell:
+        assert np.array_equal(
+            mixed,
+            get_atomic_site_potentials(volumetric_data, beta={"Cd": 0.4, "Mg": 0.3})["site_potentials"],
+        )

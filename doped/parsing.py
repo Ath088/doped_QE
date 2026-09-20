@@ -957,8 +957,10 @@ class DefectsParser:
                 forwarded to the ``doped.io`` backend where it accepts them,
                 and ignored otherwise -- currently ``beta``, the Gaussian
                 broadening width used when sampling atomic-site potentials
-                from a volumetric file (in bohr, for ``pp.x`` ``.cube`` files
-                with espresso; unused with VASP).
+                from a volumetric file (in Å, with espresso; unused with
+                VASP), either as a single value or a ``{element symbol:
+                width}`` dict. Defaults to per-element widths from the PAW
+                compensation-charge radii.
                 Note that ``bulk_symprec`` can be supplied as the ``symprec``
                 value to use for determining equivalent sites (and thus defect
                 multiplicities / bulk site symmetries), while an input
@@ -2418,8 +2420,10 @@ class DefectParser:
                 forwarded to the ``doped.io`` backend where it accepts them,
                 and ignored otherwise -- currently ``beta``, the Gaussian
                 broadening width used when sampling atomic-site potentials
-                from a volumetric file (in bohr, for ``pp.x`` ``.cube`` files
-                with espresso; unused with VASP).
+                from a volumetric file (in Å, with espresso; unused with
+                VASP), either as a single value or a ``{element symbol:
+                width}`` dict. Defaults to per-element widths from the PAW
+                compensation-charge radii.
                 Primarily used by |DefectsParser| to expedite parsing by
                 avoiding reloading bulk data for each defect. Note that
                 ``bulk_symprec`` can be supplied as the ``symprec`` value to
@@ -2565,8 +2569,10 @@ class DefectParser:
                 forwarded to the ``doped.io`` backend where it accepts them,
                 and ignored otherwise -- currently ``beta``, the Gaussian
                 broadening width used when sampling atomic-site potentials
-                from a volumetric file (in bohr, for ``pp.x`` ``.cube`` files
-                with espresso; unused with VASP).
+                from a volumetric file (in Å, with espresso; unused with
+                VASP), either as a single value or a ``{element symbol:
+                width}`` dict. Defaults to per-element widths from the PAW
+                compensation-charge radii.
                 Primarily used by |DefectsParser| to expedite parsing by
                 avoiding reloading bulk data for each defect. Note that
                 ``bulk_symprec`` can be supplied as the ``symprec`` value to
